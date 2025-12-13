@@ -33,6 +33,11 @@ class Sane
     // Disallowed URI schemes
     private static array $blockedSchemes = ['javascript', 'data', 'vbscript', 'file', 'filesystem', 'blob'];
 
+    private static array $blockedNames = [
+        'location', 'window', 'document', 'frames', 'self', 'parent', 'top',
+        'opener', 'alert', 'confirm', 'prompt', 'navigator', 'history', 'event',
+        'console', 'frames', 'length', 'content', 'forms', 'images', 'anchors'
+    ];
 
     public static function html( string $input ) : string
     {
@@ -79,6 +84,21 @@ class Sane
                         $node->removeAttribute($attr);
                     }
                 }
+            }
+        }
+
+        // --- 5. Prevent DOM clobbering by removing dangerous id/name attributes ---
+        foreach (self::$blockedNames as $blocked) {
+            // Remove id attributes
+            $nodesWithId = $xpath->query("//*[@id='$blocked']");
+            foreach ($nodesWithId as $node) {
+                $node->removeAttribute('id');
+            }
+
+            // Remove name attributes
+            $nodesWithName = $xpath->query("//*[@name='$blocked']");
+            foreach ($nodesWithName as $node) {
+                $node->removeAttribute('name');
             }
         }
 
