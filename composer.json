@@ -1,0 +1,14 @@
+{
+  "name": "aimeos/sanitizer",
+  "description": "Permissive sanitizer removing potentially dangerous content",
+  "type": "library",
+  "license": "LGPL-2.1+",
+  "autoload": {
+    "psr-4": {
+      "Aimeos\\Sanitizer\\": "src/"
+    }
+  },
+  "require": {
+    "php": "^8.1"
+  }
+}
