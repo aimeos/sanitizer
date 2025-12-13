@@ -44,7 +44,8 @@ class Sane
         $doc = new \DOMDocument();
 
         libxml_use_internal_errors(true);
-        $doc->loadHTML('<?xml encoding="UTF-8">' . $input, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
+        $doc->loadHTML('<?xml version="1.0" encoding="utf-8"?>' . $input, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
+        $doc->normalizeDocument();
         libxml_clear_errors();
 
         $xpath = new \DOMXPath($doc);
@@ -73,7 +74,7 @@ class Sane
 
         // --- 4. Remove attributes with disallowed URI schemes ---
         foreach (self::$uriAttributes as $attr) {
-            $nodesWithAttr = $xpath->query("//*[@$attr]");
+            $nodesWithAttr = $xpath->query('//*[@*[local-name()="' . $attr . '"]]');
             foreach ($nodesWithAttr as $node) {
                 $value = html_entity_decode($node->getAttribute($attr), ENT_QUOTES | ENT_HTML5);
                 $value = trim($value);
@@ -103,6 +104,6 @@ class Sane
         }
 
         // Return sanitized HTML without XML declaration
-        return preg_replace('/^<\?xml.*?\?>/', '', $doc->saveHTML());
+        return substr( $doc->saveHTML(), 38 );
     }
 }
