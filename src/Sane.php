@@ -6,7 +6,7 @@ namespace Aimeos\Sanitizer;
 class Sane
 {
     // Unsafe elements to remove completely
-    private static array $removeElements = ['base', 'embed', 'form', 'frame', 'iframe', 'link', 'math', 'meta', 'noscript', 'object', 'script', 'style', 'svg', 'template'];
+    private static array $removeElements = ['base', 'embed', 'frame', 'iframe', 'link', 'math', 'meta', 'noscript', 'object', 'script', 'style', 'svg', 'template'];
 
     // Attributes that may contain URIs
     private static array $uriAttributes = [
