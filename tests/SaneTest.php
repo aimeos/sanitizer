@@ -80,6 +80,11 @@ class SaneTest extends TestCase
         $this->assertSame( '<p>ok</p>', self::sanitize( '<link rel="stylesheet" href="https://evil.com/style.css"><p>ok</p>' ) );
     }
 
+    public function testRemovesForm() : void
+    {
+        $this->assertSame( '<p>ok</p>', self::sanitize( '<form action="https://example.com"><input></form><p>ok</p>' ) );
+    }
+
     public function testRemovesMath() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><math><mi>x</mi></math>' ) );
@@ -276,7 +281,7 @@ class SaneTest extends TestCase
 
     public function testRemovesDangerousNameAttributes() : void
     {
-        $result = Sane::html( '<form><input name="location"></form>' );
+        $result = Sane::html( '<form action="https://example.com"><input name="location"></form>', ['form' => ['https://example.com']] );
         $this->assertStringNotContainsString( 'name="location"', $result );
     }
 
@@ -294,7 +299,7 @@ class SaneTest extends TestCase
 
     public function testRemovesNameSelf() : void
     {
-        $result = Sane::html( '<form><input name="self"></form>' );
+        $result = Sane::html( '<form action="https://example.com"><input name="self"></form>', ['form' => ['https://example.com']] );
         $this->assertStringNotContainsString( 'name="self"', $result );
     }
 
@@ -494,6 +499,38 @@ class SaneTest extends TestCase
         $html = '<object data="https://cdn.example.com/w.swf"></object>';
         $result = Sane::html( $html, ['object' => ['https://cdn.example.com/']] );
         $this->assertStringNotContainsString( 'sandbox', $result );
+    }
+
+
+    // ── Allow: URI filtering for form (uses action= attribute) ──
+
+    public function testAllowFormMatchingUri() : void
+    {
+        $html = '<form action="https://example.com/submit"><input></form><p>ok</p>';
+        $result = Sane::html( $html, ['form' => ['https://example.com/']] );
+        $this->assertStringContainsString( '<form', $result );
+        $this->assertStringContainsString( 'action="https://example.com/submit"', $result );
+    }
+
+    public function testAllowFormNonMatchingUri() : void
+    {
+        $html = '<form action="https://evil.com/steal"><input></form><p>ok</p>';
+        $result = Sane::html( $html, ['form' => ['https://example.com/']] );
+        $this->assertStringNotContainsString( '<form', $result );
+    }
+
+    public function testAllowFormWithoutAction() : void
+    {
+        $html = '<form><input></form><p>ok</p>';
+        $result = Sane::html( $html, ['form' => ['https://example.com/']] );
+        $this->assertStringNotContainsString( '<form', $result );
+    }
+
+    public function testAllowFormTrue() : void
+    {
+        $html = '<form action="https://example.com/submit"><input></form><p>ok</p>';
+        $result = Sane::html( $html, ['form' => true] );
+        $this->assertStringContainsString( '<form', $result );
     }
 
 

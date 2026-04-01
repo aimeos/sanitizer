@@ -7,7 +7,7 @@ class Sane
 {
     // Unsafe elements to remove completely
     /** @var list<string> */
-    private static array $removeElements = ['base', 'embed', 'frame', 'iframe', 'link', 'math', 'meta', 'noscript', 'object', 'script', 'style', 'svg', 'template'];
+    private static array $removeElements = ['base', 'embed', 'form', 'frame', 'iframe', 'link', 'math', 'meta', 'noscript', 'object', 'script', 'style', 'svg', 'template'];
 
     // Attributes that may contain URIs
     /** @var list<string> */
@@ -32,6 +32,7 @@ class Sane
         'script' => 'src',
         'object' => 'data',
         'link'   => 'href',
+        'form'   => 'action',
         'base'   => 'href',
         'meta'   => 'content',
     ];
