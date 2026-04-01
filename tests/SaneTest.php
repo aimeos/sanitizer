@@ -21,10 +21,12 @@ class SaneTest extends TestCase
         $this->assertSame( '<p>hello world</p>', self::sanitize( 'hello world' ) );
     }
 
+
     public function testPassthroughSafeElements() : void
     {
         $this->assertSame( '<p>text</p>', self::sanitize( '<p>text</p>' ) );
     }
+
 
     public function testPassthroughSafeAttributes() : void
     {
@@ -40,60 +42,72 @@ class SaneTest extends TestCase
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><script>alert(1)</script>' ) );
     }
 
+
     public function testRemovesIframe() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><iframe src="https://evil.com"></iframe>' ) );
     }
+
 
     public function testRemovesStyle() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><style>body{display:none}</style>' ) );
     }
 
+
     public function testRemovesSvg() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><svg onload="alert(1)"></svg>' ) );
     }
+
 
     public function testRemovesObject() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><object data="https://evil.com/flash.swf"></object>' ) );
     }
 
+
     public function testRemovesEmbed() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><embed src="https://evil.com/flash.swf">' ) );
     }
+
 
     public function testRemovesBase() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<base href="https://evil.com"><p>ok</p>' ) );
     }
 
+
     public function testRemovesMeta() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<meta http-equiv="refresh" content="0;url=https://evil.com"><p>ok</p>' ) );
     }
+
 
     public function testRemovesLink() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<link rel="stylesheet" href="https://evil.com/style.css"><p>ok</p>' ) );
     }
 
+
     public function testRemovesForm() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<form action="https://example.com"><input></form><p>ok</p>' ) );
     }
+
 
     public function testRemovesMath() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><math><mi>x</mi></math>' ) );
     }
 
+
     public function testRemovesTemplate() : void
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><template><img src=x onerror=alert(1)></template>' ) );
     }
+
 
     public function testRemovesNoscript() : void
     {
@@ -107,6 +121,7 @@ class SaneTest extends TestCase
     {
         $this->assertSame( '<p>ok</p>', self::sanitize( '<!-- comment --><p>ok</p>' ) );
     }
+
 
     public function testRemovesConditionalComments() : void
     {
@@ -123,11 +138,13 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'text', $result );
     }
 
+
     public function testRemovesOnmouseover() : void
     {
         $result = Sane::html( '<a href="#" onmouseover="steal()">link</a>' );
         $this->assertStringNotContainsString( 'onmouseover', $result );
     }
+
 
     public function testRemovesOnerror() : void
     {
@@ -135,11 +152,13 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( 'onerror', $result );
     }
 
+
     public function testRemovesOnloadCaseInsensitive() : void
     {
         $result = Sane::html( '<body ONLOAD="alert(1)"><p>ok</p></body>' );
         $this->assertStringNotContainsString( 'onload', strtolower( $result ) );
     }
+
 
     public function testRemovesMultipleEventHandlers() : void
     {
@@ -168,11 +187,13 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( 'javascript', $result );
     }
 
+
     public function testBlocksJavascriptWithSpaces() : void
     {
         $result = Sane::html( '<a href="  javascript:alert(1)">click</a>' );
         $this->assertStringNotContainsString( 'javascript', $result );
     }
+
 
     public function testBlocksJavascriptCaseInsensitive() : void
     {
@@ -180,11 +201,13 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( 'href', $result );
     }
 
+
     public function testBlocksVbscript() : void
     {
         $result = Sane::html( '<a href="vbscript:MsgBox(1)">click</a>' );
         $this->assertStringNotContainsString( 'vbscript', $result );
     }
+
 
     public function testBlocksFileScheme() : void
     {
@@ -192,11 +215,13 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( 'file:', $result );
     }
 
+
     public function testBlocksBlobScheme() : void
     {
         $result = Sane::html( '<a href="blob:https://evil.com/uuid">click</a>' );
         $this->assertStringNotContainsString( 'blob:', $result );
     }
+
 
     public function testBlocksFilesystemScheme() : void
     {
@@ -204,11 +229,13 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( 'filesystem:', $result );
     }
 
+
     public function testAllowsHttpsHref() : void
     {
         $html = '<a href="https://example.com">click</a>';
         $this->assertStringContainsString( 'https://example.com', Sane::html( $html ) );
     }
+
 
     public function testAllowsRelativeHref() : void
     {
@@ -225,11 +252,13 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'data:image/png', Sane::html( $html ) );
     }
 
+
     public function testAllowsDataImageJpeg() : void
     {
         $html = '<img src="data:image/jpeg;base64,abc123">';
         $this->assertStringContainsString( 'data:image/jpeg', Sane::html( $html ) );
     }
+
 
     public function testAllowsDataImageGif() : void
     {
@@ -237,17 +266,20 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'data:image/gif', Sane::html( $html ) );
     }
 
+
     public function testAllowsDataImageWebp() : void
     {
         $html = '<img src="data:image/webp;base64,abc123">';
         $this->assertStringContainsString( 'data:image/webp', Sane::html( $html ) );
     }
 
+
     public function testBlocksDataTextHtml() : void
     {
         $result = Sane::html( '<img src="data:text/html,<script>alert(1)</script>">' );
         $this->assertStringNotContainsString( 'data:text/html', $result );
     }
+
 
     public function testBlocksDataApplicationJavascript() : void
     {
@@ -264,6 +296,7 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'srcset', Sane::html( $html ) );
     }
 
+
     public function testBlocksJavascriptInSrcset() : void
     {
         $result = Sane::html( '<img srcset="javascript:alert(1) 480w, ok.jpg 800w">' );
@@ -279,11 +312,13 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( 'id=', $result );
     }
 
+
     public function testRemovesDangerousNameAttributes() : void
     {
         $result = Sane::html( '<form action="https://example.com"><input name="location"></form>', ['form' => ['https://example.com']] );
         $this->assertStringNotContainsString( 'name="location"', $result );
     }
+
 
     public function testKeepsSafeIdAttributes() : void
     {
@@ -291,11 +326,13 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'id="mywidget"', $result );
     }
 
+
     public function testRemovesIdWindow() : void
     {
         $result = Sane::html( '<div id="window">text</div>' );
         $this->assertStringNotContainsString( 'id=', $result );
     }
+
 
     public function testRemovesNameSelf() : void
     {
@@ -311,6 +348,7 @@ class SaneTest extends TestCase
         $result = Sane::html( '<a href="https://example.com" target="_blank">link</a>' );
         $this->assertStringContainsString( 'rel="noopener noreferrer"', $result );
     }
+
 
     public function testDoesNotAddRelWithoutTargetBlank() : void
     {
@@ -329,12 +367,14 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'body{color:red}', $result );
     }
 
+
     public function testAllowSvgTrue() : void
     {
         $html = '<p>ok</p><svg width="100" height="100"><circle cx="50" cy="50" r="40"></circle></svg>';
         $result = Sane::html( $html, ['svg' => true] );
         $this->assertStringContainsString( '<svg', $result );
     }
+
 
     public function testAllowMathTrue() : void
     {
@@ -343,12 +383,14 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( '<math>', $result );
     }
 
+
     public function testAllowTemplateTrue() : void
     {
         $html = '<p>ok</p><template><div>content</div></template>';
         $result = Sane::html( $html, ['template' => true] );
         $this->assertStringContainsString( '<template>', $result );
     }
+
 
     public function testAllowNoscriptTrue() : void
     {
@@ -357,6 +399,7 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( '<noscript>', $result );
     }
 
+
     public function testAllowTrueStillStripsEventHandlers() : void
     {
         $html = '<svg onload="alert(1)" width="100"></svg>';
@@ -364,6 +407,7 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( 'onload', $result );
         $this->assertStringContainsString( '<svg', $result );
     }
+
 
     public function testAllowTrueStillStripsStyleAttributes() : void
     {
@@ -383,12 +427,14 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'src="https://www.youtube.com/embed/abc"', $result );
     }
 
+
     public function testAllowIframeNonMatchingUri() : void
     {
         $html = '<p>ok</p><iframe src="https://evil.com/page"></iframe>';
         $result = Sane::html( $html, ['iframe' => ['https://www.youtube.com/embed/']] );
         $this->assertStringNotContainsString( '<iframe', $result );
     }
+
 
     public function testAllowIframeStripsUnsafeAttributes() : void
     {
@@ -399,12 +445,14 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'width="560"', $result );
     }
 
+
     public function testAllowIframeEnforcesSandbox() : void
     {
         $html = '<iframe src="https://www.youtube.com/embed/abc"></iframe>';
         $result = Sane::html( $html, ['iframe' => ['https://www.youtube.com/embed/']] );
         $this->assertStringContainsString( 'sandbox="allow-scripts allow-same-origin allow-popups"', $result );
     }
+
 
     public function testAllowIframeMultipleUris() : void
     {
@@ -417,6 +465,7 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( '<iframe', Sane::html( $vimeo, ['iframe' => $uris] ) );
     }
 
+
     public function testAllowIframeCaseInsensitiveMatch() : void
     {
         $html = '<iframe src="HTTPS://WWW.YOUTUBE.COM/embed/abc"></iframe>';
@@ -424,12 +473,14 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( '<iframe', $result );
     }
 
+
     public function testAllowIframeRemovesWithoutSrc() : void
     {
         $html = '<p>ok</p><iframe></iframe>';
         $result = Sane::html( $html, ['iframe' => ['https://www.youtube.com/']] );
         $this->assertStringNotContainsString( '<iframe', $result );
     }
+
 
     public function testAllowIframeKeepsSafeAttrs() : void
     {
@@ -455,6 +506,7 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'width="400"', $result );
     }
 
+
     public function testAllowEmbedNonMatchingUri() : void
     {
         $html = '<p>ok</p><embed src="https://evil.com/flash.swf">';
@@ -462,12 +514,14 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( '<embed', $result );
     }
 
+
     public function testAllowEmbedStripsUnsafeAttrs() : void
     {
         $html = '<embed src="https://cdn.example.com/v.mp4" class="bad" width="400">';
         $result = Sane::html( $html, ['embed' => ['https://cdn.example.com/']] );
         $this->assertStringNotContainsString( 'class=', $result );
     }
+
 
     public function testAllowEmbedNoSandbox() : void
     {
@@ -487,12 +541,14 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'data="https://cdn.example.com/widget.swf"', $result );
     }
 
+
     public function testAllowObjectNonMatchingUri() : void
     {
         $html = '<p>ok</p><object data="https://evil.com/bad.swf"></object>';
         $result = Sane::html( $html, ['object' => ['https://cdn.example.com/']] );
         $this->assertStringNotContainsString( '<object', $result );
     }
+
 
     public function testAllowObjectNoSandbox() : void
     {
@@ -512,6 +568,7 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'action="https://example.com/submit"', $result );
     }
 
+
     public function testAllowFormNonMatchingUri() : void
     {
         $html = '<form action="https://evil.com/steal"><input></form><p>ok</p>';
@@ -519,12 +576,14 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( '<form', $result );
     }
 
+
     public function testAllowFormWithoutAction() : void
     {
         $html = '<form><input></form><p>ok</p>';
         $result = Sane::html( $html, ['form' => ['https://example.com/']] );
         $this->assertStringNotContainsString( '<form', $result );
     }
+
 
     public function testAllowFormTrue() : void
     {
@@ -544,12 +603,14 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( 'href="https://cdn.example.com/style.css"', $result );
     }
 
+
     public function testAllowLinkNonMatchingUri() : void
     {
         $html = '<link rel="stylesheet" href="https://evil.com/style.css"><p>ok</p>';
         $result = Sane::html( $html, ['link' => ['https://cdn.example.com/']] );
         $this->assertStringNotContainsString( '<link', $result );
     }
+
 
     public function testAllowLinkKeepsAllAttributes() : void
     {
@@ -569,6 +630,7 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( '<script', $result );
     }
 
+
     public function testAllowScriptNonMatchingUri() : void
     {
         $html = '<p>ok</p><script src="https://evil.com/bad.js"></script>';
@@ -586,6 +648,7 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( '<base', $result );
     }
 
+
     public function testAllowBaseNonMatchingUri() : void
     {
         $html = '<base href="https://evil.com/"><p>ok</p>';
@@ -602,6 +665,7 @@ class SaneTest extends TestCase
         $result = Sane::html( $html, ['style' => ['https://example.com/']] );
         $this->assertStringNotContainsString( '<style>', $result );
     }
+
 
     public function testUriPrefixesForSvgRemovesDefensively() : void
     {
@@ -635,6 +699,7 @@ class SaneTest extends TestCase
         $this->assertStringContainsString( '<p>ok</p>', $result );
     }
 
+
     public function testAllowedTagsDoNotAffectOtherRemovedTags() : void
     {
         $html = '<iframe src="https://www.youtube.com/embed/abc"></iframe><script>alert(1)</script><p>ok</p>';
@@ -651,10 +716,12 @@ class SaneTest extends TestCase
         $this->assertSame( '', self::sanitize( '' ) );
     }
 
+
     public function testOnlyWhitespace() : void
     {
         $this->assertSame( '', self::sanitize( '   ' ) );
     }
+
 
     public function testNestedUnsafeElements() : void
     {
