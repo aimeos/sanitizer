@@ -5,15 +5,16 @@ namespace Aimeos\Sanitizer;
 
 class Sane
 {
-    // Unsafe elements to remove completely
+    // Unsafe elements to remove completely. Includes raw-text elements
+    // (plaintext, xmp, noembed, noframes) whose content browsers parse as text
+    // but the libxml DOM does not, to avoid parser-differential surprises.
     /** @var list<string> */
-    private static array $removeElements = ['applet', 'base', 'embed', 'form', 'frame', 'iframe', 'link', 'math', 'meta', 'noscript', 'object', 'portal', 'script', 'style', 'svg', 'template'];
+    private static array $removeElements = ['applet', 'base', 'embed', 'form', 'frame', 'iframe', 'link', 'math', 'meta', 'noembed', 'noframes', 'noscript', 'object', 'plaintext', 'portal', 'script', 'style', 'svg', 'template', 'xmp'];
 
-    // SVG/SMIL animation elements that can set other attributes to dangerous
-    // values (e.g. <animate attributeName="href" to="javascript:...">); always
-    // removed, even inside an allowed <svg>. Matched case-insensitively.
+    // SVG elements that carry or set script (SMIL animation, XML-Events handler);
+    // always removed, even inside an allowed <svg>. Matched case-insensitively.
     /** @var list<string> */
-    private static array $animationElements = ['animate', 'animatemotion', 'animatetransform', 'animatecolor', 'set'];
+    private static array $unsafeSvgElements = ['animate', 'animatemotion', 'animatetransform', 'animatecolor', 'set', 'handler'];
 
     // Attributes that may contain URIs
     /** @var list<string> */
@@ -126,14 +127,34 @@ class Sane
             }
         }
 
-        // --- 1b. Remove SVG/SMIL animation elements (even inside an allowed svg) ---
+        // --- 1b. Remove script-bearing SVG elements (even inside an allowed svg) ---
         $lname = "translate(local-name(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')";
-        $conds = array_map( fn( $el ) => "{$lname}='{$el}'", self::$animationElements );
+        $conds = array_map( fn( $el ) => "{$lname}='{$el}'", self::$unsafeSvgElements );
         $animNodes = $xpath->query('//*[' . implode( ' or ', $conds ) . ']');
         if( $animNodes !== false ) {
             foreach ($animNodes as $node) {
                 if( $node instanceof \DOMNode ) {
                     $node->parentNode?->removeChild($node);
+                }
+            }
+        }
+
+        // --- 1c. Collapse any kept <noscript> to its text content. Browsers with
+        //         scripting enabled parse noscript content as raw text, but the
+        //         parser here builds a DOM, so a stray </noscript> in an attribute
+        //         would re-open parsing in the browser and free following markup. ---
+        $noscriptNodes = $xpath->query('//noscript');
+        if( $noscriptNodes !== false ) {
+            foreach ($noscriptNodes as $node) {
+                if( !$node instanceof \DOMElement || !$node->hasChildNodes() ) {
+                    continue;
+                }
+                $text = $node->textContent;
+                while( $node->firstChild !== null ) {
+                    $node->removeChild( $node->firstChild );
+                }
+                if( $text !== '' ) {
+                    $node->appendChild( $doc->createTextNode( $text ) );
                 }
             }
         }

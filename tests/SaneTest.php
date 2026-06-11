@@ -997,4 +997,64 @@ class SaneTest extends TestCase
         $result = Sane::html( '<form action="https://example.com"><input name="body"></form>', ['form' => ['https://example.com']] );
         $this->assertStringNotContainsString( 'name="body"', $result );
     }
+
+
+    // ── Raw-text / parser-differential elements ──
+
+    public function testRemovesPlaintext() : void
+    {
+        $result = Sane::html( 'A<plaintext>B<b>x</b><img src=y onerror=alert(1)>' );
+        $this->assertStringNotContainsString( 'plaintext', $result );
+        $this->assertStringNotContainsString( 'onerror', $result );
+        $this->assertStringContainsString( 'A', $result );
+    }
+
+
+    public function testRemovesXmp() : void
+    {
+        $result = Sane::html( '<xmp><img src=x onerror=alert(1)></xmp><p>ok</p>' );
+        $this->assertStringNotContainsString( '<xmp', $result );
+        $this->assertStringContainsString( '<p>ok</p>', $result );
+    }
+
+
+    public function testRemovesNoembed() : void
+    {
+        $result = Sane::html( '<noembed><img src=x onerror=alert(1)></noembed><p>ok</p>' );
+        $this->assertStringNotContainsString( 'noembed', $result );
+        $this->assertStringNotContainsString( 'onerror', $result );
+    }
+
+
+    public function testRemovesNoframes() : void
+    {
+        $result = Sane::html( '<noframes><img src=x onerror=alert(1)></noframes><p>ok</p>' );
+        $this->assertStringNotContainsString( 'noframes', $result );
+        $this->assertStringNotContainsString( 'onerror', $result );
+    }
+
+
+    public function testRemovesSvgHandler() : void
+    {
+        $result = Sane::html( '<svg><handler ev:event="load">alert(1)</handler></svg>', ['svg' => true] );
+        $this->assertStringNotContainsString( 'handler', $result );
+    }
+
+
+    // ── noscript scripting-state mutation XSS ──
+
+    public function testNoscriptTrueNeutralizesBreakout() : void
+    {
+        $result = Sane::html( '<noscript><p title="</noscript><img src=x onerror=alert(1)>"></noscript>', ['noscript' => true] );
+        $this->assertStringNotContainsString( 'onerror', $result );
+        $this->assertStringNotContainsString( '<img', $result );
+        $this->assertStringNotContainsString( 'title="</noscript>', $result );
+    }
+
+
+    public function testNoscriptTruePreservesText() : void
+    {
+        $result = Sane::html( '<p>ok</p><noscript>Enable JS</noscript>', ['noscript' => true] );
+        $this->assertStringContainsString( '<noscript>Enable JS</noscript>', $result );
+    }
 }
