@@ -81,6 +81,7 @@ class Sane
     // process. Input exceeding either limit is rejected (returns "").
     private const MAX_LENGTH = 4194304;   // 4 MiB
     private const MAX_DEPTH = 256;
+    private const MAX_ELEMENTS = 50000;
 
 
     /**
@@ -100,8 +101,8 @@ class Sane
      */
     public static function html( string $input, array $allow = [] ) : string
     {
-        // Reject hostile input before the super-linear parser runs on it.
-        if( strlen( $input ) > self::MAX_LENGTH || self::tooDeep( $input ) ) {
+        // Reject hostile input before the parser and pipeline run on it.
+        if( strlen( $input ) > self::MAX_LENGTH || self::exceedsLimits( $input ) ) {
             return '';
         }
 
@@ -115,6 +116,7 @@ class Sane
         $xpath = new \DOMXPath($doc);
 
         // --- 1. Remove all unsafe elements (skip those with allowed URIs) ---
+        $removeSet = [];
         foreach (self::$removeElements as $tag) {
             if( isset( $allow[$tag] ) ) {
                 if( $allow[$tag] === true ) {
@@ -127,13 +129,15 @@ class Sane
                 self::filterByUri( $xpath, $tag, array_values( array_filter( (array) $allow[$tag], 'is_string' ) ) );
                 continue;
             }
-            $nodes = $xpath->query("//{$tag}");
-            if( $nodes === false ) {
-                continue;
-            }
-            foreach ($nodes as $node) {
-                if( $node instanceof \DOMNode ) {
-                    $node->parentNode?->removeChild($node);
+            $removeSet[$tag] = true;
+        }
+        if( $removeSet !== [] ) {
+            $nodes = $xpath->query('//*');
+            if( $nodes !== false ) {
+                foreach ($nodes as $node) {
+                    if( $node instanceof \DOMElement && isset( $removeSet[$node->nodeName] ) ) {
+                        $node->parentNode?->removeChild($node);
+                    }
                 }
             }
         }
@@ -180,47 +184,26 @@ class Sane
             }
         }
 
-        // --- 3. Remove all on* event handler attributes ---
+        // --- 3-5. Strip event-handler (on*), style and dangerous-scheme URI
+        //          attributes in a single pass over all elements ---
         $allElements = $xpath->query('//*');
         if( $allElements !== false ) {
             foreach ($allElements as $node) {
                 if( !$node instanceof \DOMElement ) {
                     continue;
                 }
-                $attrsToRemove = [];
+                $remove = [];
                 foreach ($node->attributes as $attribute) {
-                    if (stripos($attribute->name, 'on') === 0) {
-                        $attrsToRemove[] = $attribute->name;
+                    $name = $attribute->name;
+
+                    if( stripos($name, 'on') === 0 || $name === 'style' ) {
+                        $remove[] = $attribute;
+                        continue;
                     }
-                }
-                foreach ($attrsToRemove as $name) {
-                    $node->removeAttribute($name);
-                }
-            }
-        }
 
-        // --- 4. Remove all style attributes ---
-        $styleNodes = $xpath->query('//*[@style]');
-        if( $styleNodes !== false ) {
-            foreach ($styleNodes as $node) {
-                if( $node instanceof \DOMElement ) {
-                    $node->removeAttribute('style');
-                }
-            }
-        }
-
-        // --- 5. Remove attributes with disallowed URI schemes ---
-        $uriNodes = $xpath->query('//*');
-        if( $uriNodes !== false ) {
-            foreach ($uriNodes as $node) {
-                if( !$node instanceof \DOMElement ) {
-                    continue;
-                }
-                $blocked = [];
-                foreach ($node->attributes as $attribute) {
                     // Match the full and local name so namespaced URI attributes
                     // such as xlink:href (local name "href") are checked too.
-                    if( !in_array($attribute->name, self::$uriAttributes, true)
+                    if( !in_array($name, self::$uriAttributes, true)
                         && !in_array($attribute->localName, self::$uriAttributes, true)
                     ) {
                         continue;
@@ -233,15 +216,15 @@ class Sane
                         foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
                             $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
                             if (self::isBlockedUri($url)) {
-                                $blocked[] = $attribute;
+                                $remove[] = $attribute;
                                 break;
                             }
                         }
                     } elseif (self::isBlockedUri($value)) {
-                        $blocked[] = $attribute;
+                        $remove[] = $attribute;
                     }
                 }
-                foreach ($blocked as $attribute) {
+                foreach ($remove as $attribute) {
                     $node->removeAttributeNode($attribute);
                 }
             }
@@ -280,24 +263,18 @@ class Sane
         }
 
         // --- 6. Prevent DOM clobbering by removing dangerous id/name attributes ---
-        foreach (self::$blockedNames as $blocked) {
-            // Remove id attributes
-            $nodesWithId = $xpath->query("//*[@id='$blocked']");
-            if( $nodesWithId !== false ) {
-                foreach ($nodesWithId as $node) {
-                    if( $node instanceof \DOMElement ) {
-                        $node->removeAttribute('id');
-                    }
+        $blockedSet = array_flip( self::$blockedNames );
+        $clobberNodes = $xpath->query('//*[@id or @name]');
+        if( $clobberNodes !== false ) {
+            foreach ($clobberNodes as $node) {
+                if( !$node instanceof \DOMElement ) {
+                    continue;
                 }
-            }
-
-            // Remove name attributes
-            $nodesWithName = $xpath->query("//*[@name='$blocked']");
-            if( $nodesWithName !== false ) {
-                foreach ($nodesWithName as $node) {
-                    if( $node instanceof \DOMElement ) {
-                        $node->removeAttribute('name');
-                    }
+                if( $node->hasAttribute('id') && isset( $blockedSet[$node->getAttribute('id')] ) ) {
+                    $node->removeAttribute('id');
+                }
+                if( $node->hasAttribute('name') && isset( $blockedSet[$node->getAttribute('name')] ) ) {
+                    $node->removeAttribute('name');
                 }
             }
         }
@@ -318,15 +295,15 @@ class Sane
             }
         }
 
-        // Return the sanitized content of the wrapper body only.
+        // Return the sanitized content of the wrapper body only. Serializing the
+        // body once and stripping its tags is much faster than a saveHTML() call
+        // per child when there are many top-level nodes.
         $body = $doc->getElementsByTagName('body')->item(0);
-        $html = '';
-        if( $body instanceof \DOMElement ) {
-            foreach( $body->childNodes as $child ) {
-                $html .= $html5->saveHTML( $child );
-            }
+        if( !$body instanceof \DOMElement ) {
+            return '';
         }
-        return $html;
+        $html = (string) preg_replace('#^\s*<body[^>]*>#i', '', $html5->saveHTML( $body ));
+        return (string) preg_replace('#</body>\s*$#i', '', $html);
     }
 
 
@@ -516,16 +493,17 @@ class Sane
 
 
     /**
-     * Cheap linear pre-scan reporting whether the markup nests element start
-     * tags deeper than self::MAX_DEPTH, used to reject pathological input before
-     * the super-linear HTML parser runs on it. It mirrors the parser closely
-     * enough not to be gamed downward: a close tag only pops a matching open (so
-     * bogus "</z>" can't keep the depth low), a self-closing slash counts as
-     * nesting in HTML ("<div/>" nests) but not in SVG/MathML, and the common
-     * implied end tags are applied so omitted optional close tags on legitimate
-     * lists, tables and paragraphs don't pile up.
+     * Cheap linear pre-scan reporting whether the markup exceeds the nesting
+     * depth (self::MAX_DEPTH) or element-count (self::MAX_ELEMENTS) limits, used
+     * to reject pathological input before the parser and the per-element
+     * pipeline run on it. It mirrors the parser closely enough not to be gamed
+     * downward on depth: a close tag only pops a matching open (so bogus "</z>"
+     * can't keep the depth low), a self-closing slash counts as nesting in HTML
+     * ("<div/>" nests) but not in SVG/MathML, and the common implied end tags
+     * are applied so omitted optional close tags on legitimate lists, tables and
+     * paragraphs don't pile up.
      */
-    private static function tooDeep( string $input ) : bool
+    private static function exceedsLimits( string $input ) : bool
     {
         static $void = ['area' => 1, 'base' => 1, 'br' => 1, 'col' => 1, 'embed' => 1,
             'hr' => 1, 'img' => 1, 'input' => 1, 'keygen' => 1, 'link' => 1, 'meta' => 1,
@@ -555,6 +533,7 @@ class Sane
         $stack = [];        // open element names
         $foreign = [];      // parallel: whether each open element holds SVG/MathML content
         $inForeign = false;
+        $total = 0;         // total start tags seen (≈ DOM nodes the pipeline visits)
         $len = strlen( $input );
         $offset = 0;
 
@@ -579,6 +558,10 @@ class Sane
 
             if( !ctype_alpha( $ch ) ) {
                 continue;       // comment, declaration, processing instruction or stray "<"
+            }
+
+            if( ++$total > self::MAX_ELEMENTS ) {
+                return true;
             }
 
             $name = self::tagName( $input, $offset, $len );

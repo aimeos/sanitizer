@@ -1164,6 +1164,23 @@ class SaneTest extends TestCase
     }
 
 
+    public function testRejectsExcessiveElementCount() : void
+    {
+        // shallow but with very many elements: rejected by the element-count cap
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( str_repeat( '<i>x</i>', 60000 ) ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testProcessesLargeReasonableDocument() : void
+    {
+        $doc = str_repeat( '<p>Some text.</p><ul><li>one</li><li>two</li></ul>', 4000 );
+        $result = Sane::html( $doc );
+        $this->assertStringContainsString( '<li>one</li>', $result );
+    }
+
+
     public function testRejectsDeepNestingViaUnmatchedCloseTags() : void
     {
         // bogus </z> must not let the depth guard be fooled into a low count
