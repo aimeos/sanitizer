@@ -729,4 +729,92 @@ class SaneTest extends TestCase
         $this->assertStringNotContainsString( 'script', $result );
         $this->assertStringContainsString( '<div>', $result );
     }
+
+
+    // ── Scheme bypass via control characters ──
+
+    public function testBlocksJavascriptWithEmbeddedTab() : void
+    {
+        $result = Sane::html( '<a href="java&#9;script:alert(1)">click</a>' );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+        $this->assertStringNotContainsString( 'href', $result );
+    }
+
+
+    public function testBlocksJavascriptWithEmbeddedNewline() : void
+    {
+        $result = Sane::html( '<a href="java&#10;script:alert(1)">click</a>' );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+        $this->assertStringNotContainsString( 'href', $result );
+    }
+
+
+    public function testBlocksJavascriptWithLeadingControlChar() : void
+    {
+        $result = Sane::html( '<a href="&#1;javascript:alert(1)">click</a>' );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+    }
+
+
+    // ── 5d. object data= attribute is scheme-checked ──
+
+    public function testBlocksObjectDataTextHtmlWhenAllowedTrue() : void
+    {
+        $result = Sane::html( '<object data="data:text/html;base64,PHNjcmlwdD4="></object>', ['object' => true] );
+        $this->assertStringNotContainsString( 'data:text/html', $result );
+    }
+
+
+    public function testBlocksObjectJavascriptDataWhenAllowedTrue() : void
+    {
+        $result = Sane::html( '<object data="javascript:alert(1)"></object>', ['object' => true] );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+    }
+
+
+    // ── allow=true hardens embedding tags (no srcdoc, enforces sandbox) ──
+
+    public function testAllowIframeTrueStripsSrcdoc() : void
+    {
+        $html = '<iframe src="https://www.youtube.com/embed/abc" srcdoc="<img src=x onerror=alert(1)>"></iframe>';
+        $result = Sane::html( $html, ['iframe' => true] );
+        $this->assertStringNotContainsString( 'srcdoc', $result );
+        $this->assertStringNotContainsString( 'onerror', $result );
+        $this->assertStringContainsString( '<iframe', $result );
+    }
+
+
+    public function testAllowIframeTrueEnforcesSandbox() : void
+    {
+        $html = '<iframe src="https://www.youtube.com/embed/abc"></iframe>';
+        $result = Sane::html( $html, ['iframe' => true] );
+        $this->assertStringContainsString( 'sandbox="allow-scripts allow-same-origin allow-popups"', $result );
+    }
+
+
+    public function testAllowIframeTrueStripsUnsafeAttributes() : void
+    {
+        $html = '<iframe src="https://www.youtube.com/embed/abc" class="bad" width="560"></iframe>';
+        $result = Sane::html( $html, ['iframe' => true] );
+        $this->assertStringNotContainsString( 'class=', $result );
+        $this->assertStringContainsString( 'width="560"', $result );
+    }
+
+
+    // ── 7. rel merging keeps existing tokens ──
+
+    public function testMergesExistingRelOnTargetBlank() : void
+    {
+        $result = Sane::html( '<a href="https://example.com" rel="nofollow" target="_blank">link</a>' );
+        $this->assertStringContainsString( 'nofollow', $result );
+        $this->assertStringContainsString( 'noopener', $result );
+        $this->assertStringContainsString( 'noreferrer', $result );
+    }
+
+
+    public function testAddsRelToFormTargetBlank() : void
+    {
+        $result = Sane::html( '<form action="https://example.com" target="_blank"></form>', ['form' => true] );
+        $this->assertStringContainsString( 'noopener', $result );
+    }
 }

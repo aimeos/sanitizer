@@ -12,7 +12,7 @@ class Sane
     // Attributes that may contain URIs
     /** @var list<string> */
     private static array $uriAttributes = [
-        'href', 'src', 'xlink:href', 'formaction', 'action', 'background', 'poster', 'ping', 'srcset'
+        'href', 'src', 'xlink:href', 'formaction', 'action', 'background', 'poster', 'ping', 'srcset', 'data'
     ];
 
     // Disallowed URI schemes
@@ -72,6 +72,7 @@ class Sane
         foreach (self::$removeElements as $tag) {
             if( isset( $allow[$tag] ) ) {
                 if( $allow[$tag] === true ) {
+                    self::hardenAllowed( $xpath, $tag );
                     continue;
                 }
                 self::filterByUri( $xpath, $tag, array_values( array_filter( (array) $allow[$tag], 'is_string' ) ) );
@@ -137,8 +138,10 @@ class Sane
                 if( !$node instanceof \DOMElement ) {
                     continue;
                 }
-                $value = html_entity_decode($node->getAttribute($attr), ENT_QUOTES | ENT_HTML5);
-                $value = trim($value);
+                // getAttribute() already returns the entity-decoded value the
+                // browser sees; decoding again would judge a different string
+                // than the one kept in the output.
+                $value = trim($node->getAttribute($attr));
 
                 if ($attr === 'srcset') {
                     foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
@@ -178,22 +181,29 @@ class Sane
         }
 
         // --- 7. Add rel="noopener noreferrer" to target="_blank" links ---
-        $blankLinks = $xpath->query('//a[@target="_blank"]');
+        $blankLinks = $xpath->query('//a[@target="_blank"] | //area[@target="_blank"] | //form[@target="_blank"]');
         if( $blankLinks !== false ) {
             foreach ($blankLinks as $node) {
                 if( $node instanceof \DOMElement ) {
-                    $node->setAttribute('rel', 'noopener noreferrer');
+                    $rel = array_filter(preg_split('/\s+/', trim($node->getAttribute('rel'))) ?: [], 'strlen');
+                    foreach (['noopener', 'noreferrer'] as $token) {
+                        if( !in_array($token, $rel, true) ) {
+                            $rel[] = $token;
+                        }
+                    }
+                    $node->setAttribute('rel', implode(' ', $rel));
                 }
             }
         }
 
-        // Return sanitized HTML without XML declaration
+        // Return sanitized HTML without the prepended XML declaration. Only a
+        // leading declaration is stripped so a literal "?>" inside the content
+        // can never truncate the output.
         $html = $doc->saveHTML();
         if( $html === false ) {
             return '';
         }
-        $pos = strpos($html, '?>');
-        return $pos !== false ? substr($html, $pos + 2) : $html;
+        return (string) preg_replace('/^\s*<\?xml[^>]*>\s*/', '', $html, 1);
     }
 
 
@@ -235,25 +245,62 @@ class Sane
             }
 
             // Strip attributes and enforce sandbox only for embedding tags
-            if( isset( self::$safeAttrs[$tag] ) )
-            {
-                $safe = self::$safeAttrs[$tag];
-                $attrsToRemove = [];
+            self::hardenAttributes( $node, $tag );
+        }
+    }
 
-                foreach( $node->attributes as $attr ) {
-                    if( !in_array( $attr->name, $safe, true ) ) {
-                        $attrsToRemove[] = $attr->name;
-                    }
-                }
 
-                foreach( $attrsToRemove as $name ) {
-                    $node->removeAttribute( $name );
-                }
+    /**
+     * Applies attribute hardening to every instance of an embedding tag that was
+     * allowed unconditionally (allow[$tag] === true), so an allowed iframe still
+     * cannot keep a script-executing srcdoc attribute or skip its sandbox.
+     */
+    private static function hardenAllowed( \DOMXPath $xpath, string $tag ) : void
+    {
+        if( !isset( self::$safeAttrs[$tag] ) ) {
+            return;
+        }
 
-                if( in_array( $tag, ['iframe', 'frame'], true ) ) {
-                    $node->setAttribute( 'sandbox', 'allow-scripts allow-same-origin allow-popups' );
-                }
+        $nodes = $xpath->query( "//{$tag}" );
+        if( $nodes === false ) {
+            return;
+        }
+
+        foreach( $nodes as $node ) {
+            if( $node instanceof \DOMElement ) {
+                self::hardenAttributes( $node, $tag );
             }
+        }
+    }
+
+
+    /**
+     * Removes every attribute not on the per-tag allow-list from an embedding
+     * element and enforces a sandbox where applicable. Embedding tags can carry
+     * script-executing attributes (e.g. iframe's srcdoc), so anything outside
+     * the allow-list is dropped.
+     */
+    private static function hardenAttributes( \DOMElement $node, string $tag ) : void
+    {
+        if( !isset( self::$safeAttrs[$tag] ) ) {
+            return;
+        }
+
+        $safe = self::$safeAttrs[$tag];
+        $attrsToRemove = [];
+
+        foreach( $node->attributes as $attr ) {
+            if( !in_array( $attr->name, $safe, true ) ) {
+                $attrsToRemove[] = $attr->name;
+            }
+        }
+
+        foreach( $attrsToRemove as $name ) {
+            $node->removeAttribute( $name );
+        }
+
+        if( in_array( $tag, ['iframe', 'frame'], true ) ) {
+            $node->setAttribute( 'sandbox', 'allow-scripts allow-same-origin allow-popups' );
         }
     }
 
@@ -280,7 +327,14 @@ class Sane
 
     private static function isBlockedUri( string $value ) : bool
     {
-        if (!preg_match('/^\s*([a-zA-Z][a-zA-Z0-9+.-]*)\s*:/i', $value, $matches)) {
+        // Browsers strip TAB, LF and CR from anywhere in a URL and ignore
+        // leading control characters/whitespace before resolving the scheme.
+        // Normalize the same way so payloads like "java&#9;script:" or a
+        // leading "\x01javascript:" cannot slip past the scheme detection.
+        $value = (string) preg_replace('/[\x09\x0a\x0d]+/', '', $value);
+        $value = (string) preg_replace('/^[\x00-\x20]+/', '', $value);
+
+        if (!preg_match('/^([a-zA-Z][a-zA-Z0-9+.-]*):/', $value, $matches)) {
             return false;
         }
 
