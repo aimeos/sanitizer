@@ -1057,4 +1057,64 @@ class SaneTest extends TestCase
         $result = Sane::html( '<p>ok</p><noscript>Enable JS</noscript>', ['noscript' => true] );
         $this->assertStringContainsString( '<noscript>Enable JS</noscript>', $result );
     }
+
+
+    // ── Allow-list prefix matching requires an origin/path boundary ──
+
+    public function testAllowlistRejectsDomainSuffix() : void
+    {
+        $result = Sane::html( '<iframe src="https://youtube.com.evil.com/embed/x"></iframe>', ['iframe' => ['https://youtube.com']] );
+        $this->assertStringNotContainsString( '<iframe', $result );
+    }
+
+
+    public function testAllowlistRejectsUserinfoHost() : void
+    {
+        $result = Sane::html( '<iframe src="https://youtube.com@evil.com/x"></iframe>', ['iframe' => ['https://youtube.com']] );
+        $this->assertStringNotContainsString( '<iframe', $result );
+    }
+
+
+    public function testScriptAllowlistRejectsDomainSuffix() : void
+    {
+        $result = Sane::html( '<script src="https://cdn.example.com.evil.com/a.js"></script>', ['script' => ['https://cdn.example.com']] );
+        $this->assertStringNotContainsString( '<script', $result );
+    }
+
+
+    public function testAllowlistAcceptsHostPrefixAtBoundary() : void
+    {
+        $result = Sane::html( '<iframe src="https://youtube.com/embed/x"></iframe>', ['iframe' => ['https://youtube.com']] );
+        $this->assertStringContainsString( '<iframe', $result );
+    }
+
+
+    public function testEmptyAllowlistPrefixAllowsNothing() : void
+    {
+        $result = Sane::html( '<iframe src="https://evil.com/x"></iframe>', ['iframe' => ['']] );
+        $this->assertStringNotContainsString( '<iframe', $result );
+    }
+
+
+    // ── base=true href restriction is normalized like a browser ──
+
+    public function testBaseTrueStripsBackslashHref() : void
+    {
+        $result = Sane::html( '<base href="\\\\evil.com/">', ['base' => true] );
+        $this->assertStringNotContainsString( 'evil.com', $result );
+    }
+
+
+    public function testBaseTrueStripsMixedSlashHref() : void
+    {
+        $result = Sane::html( '<base href="/\\evil.com/">', ['base' => true] );
+        $this->assertStringNotContainsString( 'evil.com', $result );
+    }
+
+
+    public function testBaseTrueStripsControlCharHref() : void
+    {
+        $result = Sane::html( '<base href="ht&#9;tps://evil.com/">', ['base' => true] );
+        $this->assertStringNotContainsString( 'evil.com', $result );
+    }
 }

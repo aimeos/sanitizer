@@ -376,7 +376,12 @@ class Sane
             if( !$node instanceof \DOMElement ) {
                 continue;
             }
-            $href = trim( $node->getAttribute('href') );
+            // Normalize like a browser (strip TAB/CR/LF and leading control
+            // chars, treat backslashes as slashes) so "\\evil", "/\evil" and
+            // "ht&#9;tps://evil" can't slip past the cross-origin test below.
+            $href = str_replace('\\', '/', (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('href')));
+            $href = (string) preg_replace('/^[\x00-\x20]+/', '', $href);
+
             if( str_starts_with($href, '//') || preg_match('#^[a-zA-Z][a-zA-Z0-9+.-]*:#', $href) ) {
                 $node->removeAttribute('href');
             }
@@ -463,12 +468,25 @@ class Sane
     private static function isAllowedUri( string $src, array $uris ) : bool
     {
         $src = strtolower( $src );
+        $boundary = ['/', '?', '#'];
 
         foreach( $uris as $uri )
         {
-            $uri = strtolower( $uri );
+            $uri = strtolower( trim( $uri ) );
 
-            if( str_starts_with( $src, $uri ) ) {
+            // Skip empty prefixes — str_starts_with('', ...) would allow anything.
+            if( $uri === '' || !str_starts_with( $src, $uri ) ) {
+                continue;
+            }
+
+            // Require the match to end at a path/query/fragment boundary so a
+            // host-level prefix like "https://site.com" cannot be extended to
+            // "https://site.com.evil.com" or "https://site.com@evil.com".
+            $next = $src[strlen( $uri )] ?? '';
+
+            if( in_array( substr( $uri, -1 ), $boundary, true )
+                || $next === '' || in_array( $next, $boundary, true )
+            ) {
                 return true;
             }
         }
