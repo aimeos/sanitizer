@@ -1277,4 +1277,22 @@ class SaneTest extends TestCase
         $result = Sane::html( '<svg><title>tip</title><circle r="1"/></svg>', ['svg' => true] );
         $this->assertStringContainsString( '<title>tip</title>', $result );
     }
+
+
+    // ── CDATA section mutation XSS ──
+
+    public function testNeutralizesCdataBreakout() : void
+    {
+        // browsers parse "<![CDATA[" as a bogus comment ending at the first ">",
+        // so the trailing <img> must not survive as live markup
+        $result = Sane::html( '<![CDATA[><img src=x onerror=alert(1)>]]>' );
+        $this->assertStringNotContainsString( '<img', $result );
+        $this->assertStringNotContainsString( '<svg', Sane::html( '<![CDATA[]]><svg onload=alert(1)>' ) );
+    }
+
+
+    public function testCdataPreservesPlainText() : void
+    {
+        $this->assertSame( 'hello world', self::sanitize( '<![CDATA[hello world]]>' ) );
+    }
 }

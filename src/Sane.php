@@ -154,6 +154,22 @@ class Sane
             }
         }
 
+        // --- Convert CDATA sections to text. HTML has no CDATA, so the parser
+        //     keeps "<![CDATA[...]]>" as a data node, but a browser treats
+        //     "<![CDATA[" as a bogus comment ending at the first ">", which would
+        //     free trailing markup (e.g. "<![CDATA[><img onerror=...>") as live
+        //     elements. Escaping the content as text neutralizes it. ---
+        if( stripos( $input, '<![cdata[' ) !== false ) {
+            $textNodes = $xpath->query('//text()');
+            if( $textNodes !== false ) {
+                foreach ($textNodes as $node) {
+                    if( $node instanceof \DOMCdataSection ) {
+                        $node->parentNode?->replaceChild( $doc->createTextNode( $node->data ), $node );
+                    }
+                }
+            }
+        }
+
         // --- Single pass over every node: remove comments, unsafe elements and
         //     script-bearing SVG elements, then on surviving elements strip
         //     event-handler/style/dangerous-URI and clobbering id/name attributes
