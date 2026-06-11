@@ -516,51 +516,114 @@ class Sane
 
 
     /**
-     * Cheap linear pre-scan that reports whether the markup nests element start
+     * Cheap linear pre-scan reporting whether the markup nests element start
      * tags deeper than self::MAX_DEPTH, used to reject pathological input before
-     * the super-linear HTML parser runs on it. It over-counts conservatively
-     * (stray "<" in text, raw-text content) which only risks rejecting absurd
-     * input, never accepting more than the limit.
+     * the super-linear HTML parser runs on it. It mirrors the parser closely
+     * enough not to be gamed downward: a close tag only pops a matching open (so
+     * bogus "</z>" can't keep the depth low), a self-closing slash counts as
+     * nesting in HTML ("<div/>" nests) but not in SVG/MathML, and the common
+     * implied end tags are applied so omitted optional close tags on legitimate
+     * lists, tables and paragraphs don't pile up.
      */
     private static function tooDeep( string $input ) : bool
     {
         static $void = ['area' => 1, 'base' => 1, 'br' => 1, 'col' => 1, 'embed' => 1,
             'hr' => 1, 'img' => 1, 'input' => 1, 'keygen' => 1, 'link' => 1, 'meta' => 1,
             'param' => 1, 'source' => 1, 'track' => 1, 'wbr' => 1];
+        // Elements whose content is HTML even inside SVG/MathML (self-close not honored there)
+        static $htmlContext = ['foreignobject' => 1, 'desc' => 1, 'title' => 1,
+            'mi' => 1, 'mo' => 1, 'mn' => 1, 'ms' => 1, 'mtext' => 1, 'annotation-xml' => 1];
+        // A start tag (key) implies the end of these currently-open elements (value set)
+        static $implied = [
+            'li' => ['li' => 1],
+            'dt' => ['dt' => 1, 'dd' => 1], 'dd' => ['dt' => 1, 'dd' => 1],
+            'option' => ['option' => 1], 'optgroup' => ['option' => 1, 'optgroup' => 1],
+            'td' => ['td' => 1, 'th' => 1], 'th' => ['td' => 1, 'th' => 1],
+            'tr' => ['tr' => 1, 'td' => 1, 'th' => 1],
+            'tbody' => ['tr' => 1, 'td' => 1, 'th' => 1, 'tbody' => 1, 'thead' => 1, 'tfoot' => 1],
+            'thead' => ['tr' => 1, 'td' => 1, 'th' => 1, 'tbody' => 1, 'thead' => 1, 'tfoot' => 1],
+            'tfoot' => ['tr' => 1, 'td' => 1, 'th' => 1, 'tbody' => 1, 'thead' => 1, 'tfoot' => 1],
+        ];
+        // Block-level start tags additionally close an open <p>
+        static $blocks = ['address' => 1, 'article' => 1, 'aside' => 1, 'blockquote' => 1,
+            'details' => 1, 'div' => 1, 'dl' => 1, 'fieldset' => 1, 'figcaption' => 1,
+            'figure' => 1, 'footer' => 1, 'form' => 1, 'h1' => 1, 'h2' => 1, 'h3' => 1,
+            'h4' => 1, 'h5' => 1, 'h6' => 1, 'header' => 1, 'hgroup' => 1, 'main' => 1,
+            'menu' => 1, 'nav' => 1, 'ol' => 1, 'p' => 1, 'pre' => 1, 'section' => 1,
+            'table' => 1, 'ul' => 1];
 
-        $depth = 0;
+        $stack = [];        // open element names
+        $foreign = [];      // parallel: whether each open element holds SVG/MathML content
+        $inForeign = false;
         $len = strlen( $input );
         $offset = 0;
 
         while( ($pos = strpos( $input, '<', $offset )) !== false )
         {
             $offset = $pos + 1;
-            $next = $input[$offset] ?? '';
+            $ch = $input[$offset] ?? '';
 
-            if( $next === '/' ) {
-                $depth = $depth > 0 ? $depth - 1 : 0;
+            if( $ch === '/' )   // end tag — pop down to the matching open, if any
+            {
+                $name = self::tagName( $input, $offset + 1, $len );
+                for( $i = count( $stack ) - 1; $i >= 0; $i-- ) {
+                    if( $stack[$i] === $name ) {
+                        array_splice( $stack, $i );
+                        array_splice( $foreign, $i );
+                        break;
+                    }
+                }
+                $inForeign = $foreign === [] ? false : $foreign[count( $foreign ) - 1];
                 continue;
             }
 
-            if( !ctype_alpha( $next ) ) {
-                continue;   // comment, declaration, processing instruction or stray "<"
+            if( !ctype_alpha( $ch ) ) {
+                continue;       // comment, declaration, processing instruction or stray "<"
             }
 
-            $end = $offset;
-            while( $end < $len && ctype_alnum( $input[$end] ) ) {
-                $end++;
-            }
-            $name = strtolower( substr( $input, $offset, $end - $offset ) );
-
-            $gt = strpos( $input, '>', $end );
+            $name = self::tagName( $input, $offset, $len );
+            $gt = strpos( $input, '>', $offset );
             $selfClosing = $gt !== false && $input[$gt - 1] === '/';
 
-            if( !isset( $void[$name] ) && !$selfClosing && ++$depth > self::MAX_DEPTH ) {
+            // Void elements never nest; a self-closing slash only ends the tag
+            // in SVG/MathML content, where "<circle/>" is a leaf.
+            if( isset( $void[$name] ) || ( $selfClosing && ( $inForeign || $name === 'svg' || $name === 'math' ) ) ) {
+                continue;
+            }
+
+            // Apply implied end tags so omitted optional close tags don't pile up.
+            while( $stack !== [] ) {
+                $top = $stack[count( $stack ) - 1];
+                if( isset( $implied[$name][$top] ) || ( $top === 'p' && isset( $blocks[$name] ) ) ) {
+                    array_pop( $stack );
+                    array_pop( $foreign );
+                } else {
+                    break;
+                }
+            }
+            $inForeign = $foreign === [] ? false : $foreign[count( $foreign ) - 1];
+
+            $stack[] = $name;
+            $foreign[] = $inForeign = $name === 'svg' || $name === 'math'
+                ? true
+                : ( isset( $htmlContext[$name] ) ? false : $inForeign );
+
+            if( count( $stack ) > self::MAX_DEPTH ) {
                 return true;
             }
         }
 
         return false;
+    }
+
+
+    private static function tagName( string $input, int $start, int $len ) : string
+    {
+        $end = $start;
+        while( $end < $len && (ctype_alnum( $input[$end] ) || $input[$end] === '-') ) {
+            $end++;
+        }
+        return strtolower( substr( $input, $start, $end - $start ) );
     }
 
 

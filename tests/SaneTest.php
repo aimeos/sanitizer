@@ -1164,6 +1164,53 @@ class SaneTest extends TestCase
     }
 
 
+    public function testRejectsDeepNestingViaUnmatchedCloseTags() : void
+    {
+        // bogus </z> must not let the depth guard be fooled into a low count
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( str_repeat( '<div></z>', 6000 ) ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testRejectsDeepNestingViaSelfClosingTags() : void
+    {
+        // "<div/>" still nests in HTML, so it must be counted as depth
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( str_repeat( '<div/>', 6000 ) ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testRejectsDeepNestingInsideForeignObject() : void
+    {
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( '<svg><foreignObject>' . str_repeat( '<div/>', 6000 ), ['svg' => true] ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testAllowsManyListItemsWithoutCloseTags() : void
+    {
+        $result = Sane::html( '<ul>' . str_repeat( '<li>item', 2000 ) . '</ul>' );
+        $this->assertStringContainsString( '<li>', $result );
+    }
+
+
+    public function testAllowsManyParagraphsWithoutCloseTags() : void
+    {
+        $result = Sane::html( str_repeat( '<p>para', 2000 ) );
+        $this->assertStringContainsString( '<p>para', $result );
+    }
+
+
+    public function testAllowsManySvgSelfClosingShapes() : void
+    {
+        $result = Sane::html( '<svg>' . str_repeat( '<path/>', 2000 ) . '</svg>', ['svg' => true] );
+        $this->assertStringContainsString( '<svg', $result );
+    }
+
+
     // ── meta refresh without "url=" / whitespace separator ──
 
     public function testBlocksMetaRefreshWithoutUrlEquals() : void
