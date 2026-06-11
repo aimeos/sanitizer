@@ -115,7 +115,41 @@ class Sane
 
         $xpath = new \DOMXPath($doc);
 
-        // --- Opt allowed elements back in (hardened); collect the rest for removal ---
+        $removeSet = self::applyAllowList( $xpath, $allow );
+
+        // <noscript>/<meta>/<script> only survive removal when explicitly
+        // allowed, so their dedicated passes run only then; CDATA only when the
+        // marker is present.
+        if( isset( $allow['noscript'] ) ) {
+            self::collapseNoscript( $xpath, $doc );
+        }
+        if( stripos( $input, '<![cdata[' ) !== false ) {
+            self::neutralizeCdata( $xpath, $doc );
+        }
+
+        self::sanitizeNodes( $xpath, $removeSet );
+
+        if( isset( $allow['meta'] ) ) {
+            self::checkMetaRefresh( $xpath );
+        }
+        if( isset( $allow['script'] ) ) {
+            self::dropInlineScripts( $xpath );
+        }
+        self::unwrapStructural( $xpath );
+
+        return self::serializeBody( $doc, $html5 );
+    }
+
+
+    /**
+     * Opts the elements in $allow back in (hardened) and returns the still-blocked
+     * element names, keyed by tag, for removal in the main pass.
+     *
+     * @param array<string, bool|list<string>> $allow
+     * @return array<string, true>
+     */
+    private static function applyAllowList( \DOMXPath $xpath, array $allow ) : array
+    {
         $removeSet = [];
         foreach (self::$removeElements as $tag) {
             if( isset( $allow[$tag] ) ) {
@@ -131,189 +165,228 @@ class Sane
             }
             $removeSet[$tag] = true;
         }
-        // --- Collapse any kept <noscript> to its text content. Browsers with
-        //     scripting enabled parse noscript content as raw text, so a stray
-        //     </noscript> in an attribute would re-open parsing in the browser
-        //     and free the following markup. Only reachable when noscript is
-        //     allowed (otherwise it was collected for removal above). ---
-        if( isset( $allow['noscript'] ) ) {
-            $noscriptNodes = $xpath->query('//noscript');
-            if( $noscriptNodes !== false ) {
-                foreach ($noscriptNodes as $node) {
-                    if( !$node instanceof \DOMElement || !$node->hasChildNodes() ) {
-                        continue;
-                    }
-                    $text = $node->textContent;
-                    while( $node->firstChild !== null ) {
-                        $node->removeChild( $node->firstChild );
-                    }
-                    if( $text !== '' ) {
-                        $node->appendChild( $doc->createTextNode( $text ) );
-                    }
-                }
+        return $removeSet;
+    }
+
+
+    /**
+     * Collapses each kept <noscript> to its text content. Browsers with scripting
+     * enabled parse noscript content as raw text, so a stray </noscript> in an
+     * attribute would re-open parsing in the browser and free the following markup.
+     */
+    private static function collapseNoscript( \DOMXPath $xpath, \DOMDocument $doc ) : void
+    {
+        $nodes = $xpath->query('//noscript');
+        if( $nodes === false ) {
+            return;
+        }
+        foreach ($nodes as $node) {
+            if( !$node instanceof \DOMElement || !$node->hasChildNodes() ) {
+                continue;
+            }
+            $text = $node->textContent;
+            while( $node->firstChild !== null ) {
+                $node->removeChild( $node->firstChild );
+            }
+            if( $text !== '' ) {
+                $node->appendChild( $doc->createTextNode( $text ) );
             }
         }
+    }
 
-        // --- Convert CDATA sections to text. HTML has no CDATA, so the parser
-        //     keeps "<![CDATA[...]]>" as a data node, but a browser treats
-        //     "<![CDATA[" as a bogus comment ending at the first ">", which would
-        //     free trailing markup (e.g. "<![CDATA[><img onerror=...>") as live
-        //     elements. Escaping the content as text neutralizes it. ---
-        if( stripos( $input, '<![cdata[' ) !== false ) {
-            $textNodes = $xpath->query('//text()');
-            if( $textNodes !== false ) {
-                foreach ($textNodes as $node) {
-                    if( $node instanceof \DOMCdataSection ) {
-                        $node->parentNode?->replaceChild( $doc->createTextNode( $node->data ), $node );
-                    }
-                }
+
+    /**
+     * Converts CDATA sections to text. HTML has no CDATA, so the parser keeps
+     * "<![CDATA[...]]>" as a data node, but a browser treats "<![CDATA[" as a
+     * bogus comment ending at the first ">", which would free trailing markup
+     * (e.g. "<![CDATA[><img onerror=...>") as live elements.
+     */
+    private static function neutralizeCdata( \DOMXPath $xpath, \DOMDocument $doc ) : void
+    {
+        $nodes = $xpath->query('//text()');
+        if( $nodes === false ) {
+            return;
+        }
+        foreach ($nodes as $node) {
+            if( $node instanceof \DOMCdataSection ) {
+                $node->parentNode?->replaceChild( $doc->createTextNode( $node->data ), $node );
             }
         }
+    }
 
-        // --- Single pass over every node: remove comments, unsafe elements and
-        //     script-bearing SVG elements, then on surviving elements strip
-        //     event-handler/style/dangerous-URI and clobbering id/name attributes
-        //     and add rel="noopener noreferrer" to target="_blank" links. ---
+
+    /**
+     * Single pass over every node: remove comments, blocked elements and
+     * script-bearing SVG elements; on each surviving element strip
+     * event-handler/style/dangerous-URI and clobbering id/name attributes and add
+     * rel="noopener noreferrer" to target="_blank" links.
+     *
+     * @param array<string, true> $removeSet
+     */
+    private static function sanitizeNodes( \DOMXPath $xpath, array $removeSet ) : void
+    {
         $animSet = array_flip( self::$unsafeSvgElements );
         $blockedSet = array_flip( self::$blockedNames );
         $uriSet = array_flip( self::$uriAttributes );
         $nodes = $xpath->query('//comment() | //*');
-        if( $nodes !== false ) {
-            foreach ($nodes as $node) {
-                if( $node instanceof \DOMComment ) {
-                    $node->parentNode?->removeChild($node);
-                    continue;
-                }
-                if( !$node instanceof \DOMElement ) {
-                    continue;
-                }
-                $tag = $node->nodeName;
-                if( isset( $removeSet[$tag] ) || isset( $animSet[strtolower($tag)] ) ) {
-                    $node->parentNode?->removeChild($node);
-                    continue;
-                }
+        if( $nodes === false ) {
+            return;
+        }
+        foreach ($nodes as $node) {
+            if( $node instanceof \DOMComment ) {
+                $node->parentNode?->removeChild($node);
+                continue;
+            }
+            if( !$node instanceof \DOMElement ) {
+                continue;
+            }
+            $tag = $node->nodeName;
+            if( isset( $removeSet[$tag] ) || isset( $animSet[strtolower($tag)] ) ) {
+                $node->parentNode?->removeChild($node);
+                continue;
+            }
 
-                $remove = [];
-                $blankTarget = false;
-                foreach ($node->attributes as $attribute) {
-                    $name = $attribute->name;
+            $remove = [];
+            $blankTarget = false;
+            foreach ($node->attributes as $attribute) {
+                $name = $attribute->name;
 
-                    if( stripos($name, 'on') === 0 || $name === 'style' ) {
+                if( stripos($name, 'on') === 0 || $name === 'style' ) {
+                    $remove[] = $attribute;
+                    continue;
+                }
+                if( $name === 'id' || $name === 'name' ) {
+                    // DOM clobbering: drop id/name shadowing a window/document property
+                    if( isset( $blockedSet[$attribute->value] ) ) {
                         $remove[] = $attribute;
-                        continue;
                     }
-                    if( $name === 'id' || $name === 'name' ) {
-                        // DOM clobbering: drop id/name shadowing a window/document property
-                        if( isset( $blockedSet[$attribute->value] ) ) {
+                    continue;
+                }
+                if( $name === 'target' && $attribute->value === '_blank' ) {
+                    $blankTarget = true;
+                    continue;
+                }
+
+                // Match the full and local name so namespaced URI attributes
+                // such as xlink:href (local name "href") are checked too.
+                $local = $attribute->localName;
+                if( !isset( $uriSet[$name] ) && ( $local === null || !isset( $uriSet[$local] ) ) ) {
+                    continue;
+                }
+                // The attribute value is already entity-decoded to what the
+                // browser sees, so it is checked as-is.
+                $value = trim($attribute->value);
+
+                if ($local === 'srcset') {
+                    foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
+                        $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
+                        if (self::isBlockedUri($url)) {
                             $remove[] = $attribute;
-                        }
-                        continue;
-                    }
-                    if( $name === 'target' && $attribute->value === '_blank' ) {
-                        $blankTarget = true;
-                        continue;
-                    }
-
-                    // Match the full and local name so namespaced URI attributes
-                    // such as xlink:href (local name "href") are checked too.
-                    $local = $attribute->localName;
-                    if( !isset( $uriSet[$name] ) && ( $local === null || !isset( $uriSet[$local] ) ) ) {
-                        continue;
-                    }
-                    // The attribute value is already entity-decoded to what the
-                    // browser sees, so it is checked as-is.
-                    $value = trim($attribute->value);
-
-                    if ($local === 'srcset') {
-                        foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
-                            $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
-                            if (self::isBlockedUri($url)) {
-                                $remove[] = $attribute;
-                                break;
-                            }
-                        }
-                    } elseif (self::isBlockedUri($value)) {
-                        $remove[] = $attribute;
-                    }
-                }
-                foreach ($remove as $attribute) {
-                    $node->removeAttributeNode($attribute);
-                }
-
-                if( $blankTarget && ($tag === 'a' || $tag === 'area' || $tag === 'form') ) {
-                    $rel = preg_split('/\s+/', trim($node->getAttribute('rel')), -1, PREG_SPLIT_NO_EMPTY) ?: [];
-                    foreach (['noopener', 'noreferrer'] as $token) {
-                        if( !in_array($token, $rel, true) ) {
-                            $rel[] = $token;
+                            break;
                         }
                     }
-                    $node->setAttribute('rel', implode(' ', $rel));
+                } elseif (self::isBlockedUri($value)) {
+                    $remove[] = $attribute;
                 }
             }
-        }
+            foreach ($remove as $attribute) {
+                $node->removeAttributeNode($attribute);
+            }
 
-        // --- Neutralize <meta http-equiv="refresh"> redirects to blocked schemes.
-        //     Only reachable when meta is allowed. ---
-        if( isset( $allow['meta'] ) ) {
-            $metaNodes = $xpath->query('//meta[@content]');
-            if( $metaNodes !== false ) {
-                foreach ($metaNodes as $node) {
-                    if( !$node instanceof \DOMElement ) {
-                        continue;
-                    }
-                    // Strip TAB/CR/LF first so an embedded control char can't hide
-                    // the scheme from the URL extraction below (browsers strip them).
-                    $content = (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('content'));
-                    // The redirect URL follows the time and a separator (";", "," or
-                    // whitespace), with an optional "url=" prefix — handle every form.
-                    if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
-                        && preg_match('/^\s*[\d.]*\s*[;,]?\s*(?:url\s*=\s*)?["\']?\s*([^"\'\s>]+)/i', $content, $m)
-                        && self::isBlockedUri($m[1])
-                    ) {
-                        $node->removeAttribute('content');
+            if( $blankTarget && ($tag === 'a' || $tag === 'area' || $tag === 'form') ) {
+                $rel = preg_split('/\s+/', trim($node->getAttribute('rel')), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+                foreach (['noopener', 'noreferrer'] as $token) {
+                    if( !in_array($token, $rel, true) ) {
+                        $rel[] = $token;
                     }
                 }
+                $node->setAttribute('rel', implode(' ', $rel));
             }
         }
+    }
 
-        // --- Drop inline scripts; an allowed <script> is only kept when it loads
-        //     from an external src that survived the scheme check. Only reachable
-        //     when script is allowed. ---
-        if( isset( $allow['script'] ) ) {
-            $scriptNodes = $xpath->query('//script');
-            if( $scriptNodes !== false ) {
-                foreach ($scriptNodes as $node) {
-                    if( $node instanceof \DOMElement && trim($node->getAttribute('src')) === '' ) {
-                        $node->parentNode?->removeChild($node);
-                    }
-                }
+
+    /**
+     * Neutralizes <meta http-equiv="refresh"> redirects whose URL uses a blocked
+     * scheme. Only reachable when meta is allowed.
+     */
+    private static function checkMetaRefresh( \DOMXPath $xpath ) : void
+    {
+        $nodes = $xpath->query('//meta[@content]');
+        if( $nodes === false ) {
+            return;
+        }
+        foreach ($nodes as $node) {
+            if( !$node instanceof \DOMElement ) {
+                continue;
+            }
+            // Strip TAB/CR/LF first so an embedded control char can't hide the
+            // scheme from the URL extraction below (browsers strip them).
+            $content = (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('content'));
+            // The redirect URL follows the time and a separator (";", "," or
+            // whitespace), with an optional "url=" prefix — handle every form.
+            if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
+                && preg_match('/^\s*[\d.]*\s*[;,]?\s*(?:url\s*=\s*)?["\']?\s*([^"\'\s>]+)/i', $content, $m)
+                && self::isBlockedUri($m[1])
+            ) {
+                $node->removeAttribute('content');
             }
         }
+    }
 
-        // --- Unwrap structural document elements (<html>/<head>/<body>/<title>/
-        //     <frameset>) the parser may have nested inside the wrapper body, so
-        //     they don't leak into the fragment output (and can't inject
-        //     attributes into a host page's body/html if the output is inlined). ---
-        // (SVG/MathML <title> is a real child element there, so exclude it.)
-        $structural = $xpath->query('//body//html | //body//head | //body//body | //body//frameset'
+
+    /**
+     * Drops inline scripts; an allowed <script> is only kept when it loads from an
+     * external src that survived the scheme check. Only reachable when script is
+     * allowed.
+     */
+    private static function dropInlineScripts( \DOMXPath $xpath ) : void
+    {
+        $nodes = $xpath->query('//script');
+        if( $nodes === false ) {
+            return;
+        }
+        foreach ($nodes as $node) {
+            if( $node instanceof \DOMElement && trim($node->getAttribute('src')) === '' ) {
+                $node->parentNode?->removeChild($node);
+            }
+        }
+    }
+
+
+    /**
+     * Unwraps structural document elements (<html>/<head>/<body>/<title>/<frameset>)
+     * the parser may have nested inside the wrapper body, so they don't leak into
+     * the fragment output (and can't inject attributes into a host page's body/html
+     * if the output is inlined). SVG/MathML <title> is a real child there, excluded.
+     */
+    private static function unwrapStructural( \DOMXPath $xpath ) : void
+    {
+        $nodes = $xpath->query('//body//html | //body//head | //body//body | //body//frameset'
             . ' | //body//title[not(ancestor::svg) and not(ancestor::math)]');
-        if( $structural !== false ) {
-            foreach ($structural as $node) {
-                if( !$node instanceof \DOMElement || $node->parentNode === null ) {
-                    continue;
-                }
-                while( $node->firstChild !== null ) {
-                    $node->parentNode->insertBefore( $node->firstChild, $node );
-                }
-                $node->parentNode->removeChild( $node );
-            }
+        if( $nodes === false ) {
+            return;
         }
+        foreach ($nodes as $node) {
+            if( !$node instanceof \DOMElement || $node->parentNode === null ) {
+                continue;
+            }
+            while( $node->firstChild !== null ) {
+                $node->parentNode->insertBefore( $node->firstChild, $node );
+            }
+            $node->parentNode->removeChild( $node );
+        }
+    }
 
-        // --- Return the sanitized content of the wrapper body. Its own attributes
-        //     are never part of the output and are cleared so the wrapper-tag strip
-        //     stays robust even if the parser merged input <body> attributes onto
-        //     it; serializing once is much faster than a saveHTML() call per child
-        //     when there are many top-level nodes. ---
+
+    /**
+     * Returns the sanitized content of the wrapper body. Its own attributes are
+     * never part of the output and are cleared so the wrapper-tag strip stays
+     * robust even if the parser merged input <body> attributes onto it; serializing
+     * once is much faster than a saveHTML() call per child for many top-level nodes.
+     */
+    private static function serializeBody( \DOMDocument $doc, \Masterminds\HTML5 $html5 ) : string
+    {
         $body = $doc->getElementsByTagName('body')->item(0);
         if( !$body instanceof \DOMElement ) {
             return '';
