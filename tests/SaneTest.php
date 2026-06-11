@@ -1096,6 +1096,20 @@ class SaneTest extends TestCase
     }
 
 
+    public function testPathPrefixRejectsProtocolRelativeUrl() : void
+    {
+        $result = Sane::html( '<iframe src="//evil.com/x"></iframe>', ['iframe' => ['/']] );
+        $this->assertStringNotContainsString( '<iframe', $result );
+    }
+
+
+    public function testPathPrefixAcceptsSameOriginPath() : void
+    {
+        $result = Sane::html( '<iframe src="/local/widget"></iframe>', ['iframe' => ['/']] );
+        $this->assertStringContainsString( 'src="/local/widget"', $result );
+    }
+
+
     // ── base=true href restriction is normalized like a browser ──
 
     public function testBaseTrueStripsBackslashHref() : void

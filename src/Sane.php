@@ -479,6 +479,13 @@ class Sane
                 continue;
             }
 
+            // A protocol-relative ("//host") candidate is cross-origin; only
+            // allow it when the prefix is itself protocol-relative, not a bare
+            // path prefix like "/".
+            if( str_starts_with( $src, '//' ) && !str_starts_with( $uri, '//' ) ) {
+                continue;
+            }
+
             // Require the match to end at a path/query/fragment boundary so a
             // host-level prefix like "https://site.com" cannot be extended to
             // "https://site.com.evil.com" or "https://site.com@evil.com".
