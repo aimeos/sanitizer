@@ -868,4 +868,30 @@ class SaneTest extends TestCase
         $result = Sane::html( '<meta name="viewport" content="width=device-width">', ['meta' => true] );
         $this->assertStringContainsString( 'width=device-width', $result );
     }
+
+
+    // ── Stricter script mode: only external src scripts survive ──
+
+    public function testAllowScriptTrueDropsInlineScript() : void
+    {
+        $result = Sane::html( '<p>ok</p><script>alert(1)</script>', ['script' => true] );
+        $this->assertStringNotContainsString( '<script', $result );
+        $this->assertStringNotContainsString( 'alert', $result );
+        $this->assertStringContainsString( '<p>ok</p>', $result );
+    }
+
+
+    public function testAllowScriptTrueKeepsExternalScript() : void
+    {
+        $result = Sane::html( '<script src="https://cdn.example.com/app.js"></script>', ['script' => true] );
+        $this->assertStringContainsString( '<script', $result );
+        $this->assertStringContainsString( 'src="https://cdn.example.com/app.js"', $result );
+    }
+
+
+    public function testAllowScriptTrueDropsDataUriScript() : void
+    {
+        $result = Sane::html( '<script src="data:text/javascript,alert(1)"></script>', ['script' => true] );
+        $this->assertStringNotContainsString( '<script', $result );
+    }
 }

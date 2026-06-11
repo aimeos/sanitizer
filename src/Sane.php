@@ -64,10 +64,11 @@ class Sane
      * Sanitizes the HTML input, removing potentially dangerous content.
      *
      * The $allow map opts specific blocked elements back in, keyed by tag name:
-     * - true keeps the element regardless of its URL. The global passes still
-     *   strip event handlers, "style" attributes and dangerous-scheme URLs, but
-     *   for tags carrying executable inline content (e.g. script, style) that
-     *   content is kept verbatim — only pass true for tags you fully trust.
+     * - true keeps the element regardless of its URL. Event handlers, "style"
+     *   attributes and dangerous-scheme URLs are still stripped, and inline
+     *   <script> is dropped (only scripts loading from an external src are
+     *   kept). Other inline content such as <style> CSS is kept verbatim, so
+     *   only pass true for tags you fully trust.
      * - list<string> keeps the element only when its URL starts with one of the
      *   given prefixes; embedding tags are additionally reduced to a safe
      *   attribute allow-list and sandboxed.
@@ -207,6 +208,17 @@ class Sane
                     && self::isBlockedUri($m[1])
                 ) {
                     $node->removeAttribute('content');
+                }
+            }
+        }
+
+        // --- 5c. Drop inline scripts; an allowed <script> is only kept when it
+        //         loads from an external src that survived the scheme check ---
+        $scriptNodes = $xpath->query('//script');
+        if( $scriptNodes !== false ) {
+            foreach ($scriptNodes as $node) {
+                if( $node instanceof \DOMElement && trim($node->getAttribute('src')) === '' ) {
+                    $node->parentNode?->removeChild($node);
                 }
             }
         }
