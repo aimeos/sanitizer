@@ -1131,4 +1131,51 @@ class SaneTest extends TestCase
         $result = Sane::html( '<base href="ht&#9;tps://evil.com/">', ['base' => true] );
         $this->assertStringNotContainsString( 'evil.com', $result );
     }
+
+
+    // ── Resource limits (DoS) ──
+
+    public function testRejectsDeeplyNestedInput() : void
+    {
+        $start = microtime( true );
+        $result = Sane::html( str_repeat( '<div>', 5000 ) . str_repeat( '</div>', 5000 ) );
+        $this->assertSame( '', $result );
+        $this->assertLessThan( 1.0, microtime( true ) - $start, 'deeply nested input must be rejected quickly' );
+    }
+
+
+    public function testAllowsReasonableNesting() : void
+    {
+        $result = Sane::html( str_repeat( '<div>', 100 ) . 'deep' . str_repeat( '</div>', 100 ) );
+        $this->assertStringContainsString( 'deep', $result );
+    }
+
+
+    public function testManyVoidElementsAreNotRejectedAsDeep() : void
+    {
+        $result = Sane::html( str_repeat( '<br>', 1000 ) . 'ok' );
+        $this->assertStringContainsString( 'ok', $result );
+    }
+
+
+    public function testRejectsOversizedInput() : void
+    {
+        $this->assertSame( '', Sane::html( str_repeat( 'a', 4194305 ) ) );
+    }
+
+
+    // ── meta refresh without "url=" / whitespace separator ──
+
+    public function testBlocksMetaRefreshWithoutUrlEquals() : void
+    {
+        $result = Sane::html( '<meta http-equiv="refresh" content="0;javascript:alert(1)">', ['meta' => true] );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+    }
+
+
+    public function testBlocksMetaRefreshWhitespaceSeparator() : void
+    {
+        $result = Sane::html( '<meta http-equiv="refresh" content="0 vbscript:msgbox(1)">', ['meta' => true] );
+        $this->assertStringNotContainsString( 'vbscript', strtolower( $result ) );
+    }
 }

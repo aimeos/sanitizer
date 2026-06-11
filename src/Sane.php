@@ -76,6 +76,12 @@ class Sane
         'writeln', 'querySelector', 'querySelectorAll'
     ];
 
+    // Resource limits for hostile input: deeply nested markup makes the HTML
+    // parser run in roughly O(depth^2), and very large input is costly to
+    // process. Input exceeding either limit is rejected (returns "").
+    private const MAX_LENGTH = 4194304;   // 4 MiB
+    private const MAX_DEPTH = 256;
+
 
     /**
      * Sanitizes the HTML input, removing potentially dangerous content.
@@ -94,6 +100,11 @@ class Sane
      */
     public static function html( string $input, array $allow = [] ) : string
     {
+        // Reject hostile input before the super-linear parser runs on it.
+        if( strlen( $input ) > self::MAX_LENGTH || self::tooDeep( $input ) ) {
+            return '';
+        }
+
         // Parse with the HTML5 algorithm (matching browsers) so the
         // parse → sanitize → serialize → browser-reparse cycle stays
         // consistent and can't be exploited via parser-differential mutation
@@ -246,8 +257,10 @@ class Sane
                 // Strip TAB/CR/LF first so an embedded control char can't hide
                 // the scheme from the URL extraction below (browsers strip them).
                 $content = (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('content'));
+                // The redirect URL follows the time and a separator (";", "," or
+                // whitespace), with an optional "url=" prefix — handle every form.
                 if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
-                    && preg_match('/url\s*=\s*["\']?\s*([^"\'\s>]+)/i', $content, $m)
+                    && preg_match('/^\s*[\d.]*\s*[;,]?\s*(?:url\s*=\s*)?["\']?\s*([^"\'\s>]+)/i', $content, $m)
                     && self::isBlockedUri($m[1])
                 ) {
                     $node->removeAttribute('content');
@@ -494,6 +507,55 @@ class Sane
             if( in_array( substr( $uri, -1 ), $boundary, true )
                 || $next === '' || in_array( $next, $boundary, true )
             ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+
+    /**
+     * Cheap linear pre-scan that reports whether the markup nests element start
+     * tags deeper than self::MAX_DEPTH, used to reject pathological input before
+     * the super-linear HTML parser runs on it. It over-counts conservatively
+     * (stray "<" in text, raw-text content) which only risks rejecting absurd
+     * input, never accepting more than the limit.
+     */
+    private static function tooDeep( string $input ) : bool
+    {
+        static $void = ['area' => 1, 'base' => 1, 'br' => 1, 'col' => 1, 'embed' => 1,
+            'hr' => 1, 'img' => 1, 'input' => 1, 'keygen' => 1, 'link' => 1, 'meta' => 1,
+            'param' => 1, 'source' => 1, 'track' => 1, 'wbr' => 1];
+
+        $depth = 0;
+        $len = strlen( $input );
+        $offset = 0;
+
+        while( ($pos = strpos( $input, '<', $offset )) !== false )
+        {
+            $offset = $pos + 1;
+            $next = $input[$offset] ?? '';
+
+            if( $next === '/' ) {
+                $depth = $depth > 0 ? $depth - 1 : 0;
+                continue;
+            }
+
+            if( !ctype_alpha( $next ) ) {
+                continue;   // comment, declaration, processing instruction or stray "<"
+            }
+
+            $end = $offset;
+            while( $end < $len && ctype_alnum( $input[$end] ) ) {
+                $end++;
+            }
+            $name = strtolower( substr( $input, $offset, $end - $offset ) );
+
+            $gt = strpos( $input, '>', $end );
+            $selfClosing = $gt !== false && $input[$gt - 1] === '/';
+
+            if( !isset( $void[$name] ) && !$selfClosing && ++$depth > self::MAX_DEPTH ) {
                 return true;
             }
         }
