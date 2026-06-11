@@ -1242,4 +1242,39 @@ class SaneTest extends TestCase
         $result = Sane::html( '<meta http-equiv="refresh" content="0 vbscript:msgbox(1)">', ['meta' => true] );
         $this->assertStringNotContainsString( 'vbscript', strtolower( $result ) );
     }
+
+
+    // ── Structural elements do not leak into the output ──
+
+    public function testUnwrapsLeakedBodyTag() : void
+    {
+        $result = Sane::html( '<body title="x">hi' );
+        $this->assertSame( 'hi', self::sanitize( $result ) );
+        $this->assertStringNotContainsString( '<body', $result );
+    }
+
+
+    public function testUnwrapsLeakedHtmlHeadTitle() : void
+    {
+        $result = Sane::html( '<html lang="en"><head><title>t</title></head><body>content</body></html>' );
+        foreach (['<html', '<head', '<body', '<title'] as $tag) {
+            $this->assertStringNotContainsString( $tag, $result );
+        }
+        $this->assertStringContainsString( 'content', $result );
+    }
+
+
+    public function testBodyAttributeCannotInjectMarkup() : void
+    {
+        $result = Sane::html( '<body title="x><img src=x onerror=alert(1)>">hi' );
+        $this->assertStringNotContainsString( 'onerror', $result );
+        $this->assertStringNotContainsString( '<img', $result );
+    }
+
+
+    public function testPreservesSvgTitleElement() : void
+    {
+        $result = Sane::html( '<svg><title>tip</title><circle r="1"/></svg>', ['svg' => true] );
+        $this->assertStringContainsString( '<title>tip</title>', $result );
+    }
 }

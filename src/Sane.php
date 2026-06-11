@@ -274,12 +274,40 @@ class Sane
             }
         }
 
-        // Return the sanitized content of the wrapper body only. Serializing the
-        // body once and stripping its tags is much faster than a saveHTML() call
-        // per child when there are many top-level nodes.
+        // --- Unwrap structural document elements (<html>/<head>/<body>/<title>/
+        //     <frameset>) the parser may have nested inside the wrapper body, so
+        //     they don't leak into the fragment output (and can't inject
+        //     attributes into a host page's body/html if the output is inlined). ---
+        // (SVG/MathML <title> is a real child element there, so exclude it.)
+        $structural = $xpath->query('//body//html | //body//head | //body//body | //body//frameset'
+            . ' | //body//title[not(ancestor::svg) and not(ancestor::math)]');
+        if( $structural !== false ) {
+            foreach ($structural as $node) {
+                if( !$node instanceof \DOMElement || $node->parentNode === null ) {
+                    continue;
+                }
+                while( $node->firstChild !== null ) {
+                    $node->parentNode->insertBefore( $node->firstChild, $node );
+                }
+                $node->parentNode->removeChild( $node );
+            }
+        }
+
+        // --- Return the sanitized content of the wrapper body. Its own attributes
+        //     are never part of the output and are cleared so the wrapper-tag strip
+        //     stays robust even if the parser merged input <body> attributes onto
+        //     it; serializing once is much faster than a saveHTML() call per child
+        //     when there are many top-level nodes. ---
         $body = $doc->getElementsByTagName('body')->item(0);
         if( !$body instanceof \DOMElement ) {
             return '';
+        }
+        while( $body->attributes->length > 0 ) {
+            $attr = $body->attributes->item(0);
+            if( !$attr instanceof \DOMAttr ) {
+                break;
+            }
+            $body->removeAttributeNode( $attr );
         }
         $html = (string) preg_replace('#^\s*<body[^>]*>#i', '', $html5->saveHTML( $body ));
         return (string) preg_replace('#</body>\s*$#i', '', $html);
