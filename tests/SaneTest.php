@@ -18,7 +18,7 @@ class SaneTest extends TestCase
 
     public function testPassthroughPlainText() : void
     {
-        $this->assertSame( '<p>hello world</p>', self::sanitize( 'hello world' ) );
+        $this->assertSame( 'hello world', self::sanitize( 'hello world' ) );
     }
 
 

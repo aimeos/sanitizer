@@ -59,12 +59,12 @@ class Sane
      */
     public static function html( string $input, array $allow = [] ) : string
     {
-        $doc = new \DOMDocument();
-
-        libxml_use_internal_errors(true);
-        $doc->loadHTML('<?xml version="1.0" encoding="utf-8"?>' . $input, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
-        $doc->normalizeDocument();
-        libxml_clear_errors();
+        // Parse with the HTML5 algorithm (matching browsers) so the
+        // parse → sanitize → serialize → browser-reparse cycle stays
+        // consistent and can't be exploited via parser-differential mutation
+        // XSS the way the libxml HTML4 parser could.
+        $html5 = new \Masterminds\HTML5(['disable_html_ns' => true]);
+        $doc = $html5->loadHTML('<!DOCTYPE html><html><body>' . $input . '</body></html>');
 
         $xpath = new \DOMXPath($doc);
 
@@ -185,7 +185,7 @@ class Sane
         if( $blankLinks !== false ) {
             foreach ($blankLinks as $node) {
                 if( $node instanceof \DOMElement ) {
-                    $rel = array_filter(preg_split('/\s+/', trim($node->getAttribute('rel'))) ?: [], 'strlen');
+                    $rel = preg_split('/\s+/', trim($node->getAttribute('rel')), -1, PREG_SPLIT_NO_EMPTY) ?: [];
                     foreach (['noopener', 'noreferrer'] as $token) {
                         if( !in_array($token, $rel, true) ) {
                             $rel[] = $token;
@@ -196,14 +196,15 @@ class Sane
             }
         }
 
-        // Return sanitized HTML without the prepended XML declaration. Only a
-        // leading declaration is stripped so a literal "?>" inside the content
-        // can never truncate the output.
-        $html = $doc->saveHTML();
-        if( $html === false ) {
-            return '';
+        // Return the sanitized content of the wrapper body only.
+        $body = $doc->getElementsByTagName('body')->item(0);
+        $html = '';
+        if( $body instanceof \DOMElement ) {
+            foreach( $body->childNodes as $child ) {
+                $html .= $html5->saveHTML( $child );
+            }
         }
-        return (string) preg_replace('/^\s*<\?xml[^>]*>\s*/', '', $html, 1);
+        return $html;
     }
 
 
