@@ -7,7 +7,7 @@ class Sane
 {
     // Unsafe elements to remove completely
     /** @var list<string> */
-    private static array $removeElements = ['base', 'embed', 'form', 'frame', 'iframe', 'link', 'math', 'meta', 'noscript', 'object', 'script', 'style', 'svg', 'template'];
+    private static array $removeElements = ['applet', 'base', 'embed', 'form', 'frame', 'iframe', 'link', 'math', 'meta', 'noscript', 'object', 'portal', 'script', 'style', 'svg', 'template'];
 
     // SVG/SMIL animation elements that can set other attributes to dangerous
     // values (e.g. <animate attributeName="href" to="javascript:...">); always
@@ -52,11 +52,27 @@ class Sane
         'object' => ['data', 'width', 'height', 'type', 'title'],
     ];
 
+    // Permissions-Policy features allowed in an iframe "allow" attribute; covers
+    // common media embeds while dropping powerful ones (camera, microphone,
+    // geolocation, display-capture, usb, ...).
+    /** @var list<string> */
+    private static array $safeAllowFeatures = [
+        'accelerometer', 'autoplay', 'clipboard-write', 'encrypted-media',
+        'fullscreen', 'gyroscope', 'picture-in-picture', 'web-share'
+    ];
+
+    // Best-effort DOM-clobbering denylist: id/name values that would shadow a
+    // window/document/form property. Not exhaustive — see SANITIZE_DOM-style
+    // checks for full coverage.
     /** @var list<string> */
     private static array $blockedNames = [
         'location', 'window', 'document', 'frames', 'self', 'parent', 'top',
         'opener', 'alert', 'confirm', 'prompt', 'navigator', 'history', 'event',
-        'console', 'frames', 'length', 'content', 'forms', 'images', 'anchors'
+        'console', 'length', 'content', 'forms', 'images', 'anchors', 'links',
+        'scripts', 'embeds', 'plugins', 'applets', 'all', 'cookie', 'domain',
+        'referrer', 'defaultView', 'documentElement', 'body', 'head',
+        'getElementById', 'getElementsByName', 'createElement', 'write',
+        'writeln', 'querySelector', 'querySelectorAll'
     ];
 
 
@@ -91,6 +107,9 @@ class Sane
             if( isset( $allow[$tag] ) ) {
                 if( $allow[$tag] === true ) {
                     self::hardenAllowed( $xpath, $tag );
+                    if( $tag === 'base' ) {
+                        self::restrictBaseHref( $xpath );
+                    }
                     continue;
                 }
                 self::filterByUri( $xpath, $tag, array_values( array_filter( (array) $allow[$tag], 'is_string' ) ) );
@@ -203,8 +222,11 @@ class Sane
                 if( !$node instanceof \DOMElement ) {
                     continue;
                 }
+                // Strip TAB/CR/LF first so an embedded control char can't hide
+                // the scheme from the URL extraction below (browsers strip them).
+                $content = (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('content'));
                 if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
-                    && preg_match('/url\s*=\s*["\']?\s*([^"\'\s>]+)/i', $node->getAttribute('content'), $m)
+                    && preg_match('/url\s*=\s*["\']?\s*([^"\'\s>]+)/i', $content, $m)
                     && self::isBlockedUri($m[1])
                 ) {
                     $node->removeAttribute('content');
@@ -318,6 +340,30 @@ class Sane
 
 
     /**
+     * Removes an absolute or protocol-relative href from <base> elements allowed
+     * unconditionally, so they cannot repoint every relative URL to another
+     * origin. Bases allowed via a URL-prefix list are already origin-restricted.
+     */
+    private static function restrictBaseHref( \DOMXPath $xpath ) : void
+    {
+        $nodes = $xpath->query('//base[@href]');
+        if( $nodes === false ) {
+            return;
+        }
+
+        foreach( $nodes as $node ) {
+            if( !$node instanceof \DOMElement ) {
+                continue;
+            }
+            $href = trim( $node->getAttribute('href') );
+            if( str_starts_with($href, '//') || preg_match('#^[a-zA-Z][a-zA-Z0-9+.-]*:#', $href) ) {
+                $node->removeAttribute('href');
+            }
+        }
+    }
+
+
+    /**
      * Applies attribute hardening to every instance of an embedding tag that was
      * allowed unconditionally (allow[$tag] === true), so an allowed iframe still
      * cannot keep a script-executing srcdoc attribute or skip its sandbox.
@@ -366,8 +412,26 @@ class Sane
             $node->removeAttribute( $name );
         }
 
+        // Restrict the iframe Permissions-Policy "allow" attribute to safe
+        // features so an allowed embed can't request e.g. camera or microphone.
+        if( $tag === 'iframe' && $node->hasAttribute( 'allow' ) ) {
+            $kept = [];
+            foreach( explode( ';', $node->getAttribute( 'allow' ) ) as $directive ) {
+                $directive = trim( $directive );
+                $feature = strtolower( (preg_split( '/\s+/', $directive ) ?: [''])[0] );
+                if( $directive !== '' && in_array( $feature, self::$safeAllowFeatures, true ) ) {
+                    $kept[] = $directive;
+                }
+            }
+            $kept ? $node->setAttribute( 'allow', implode( '; ', $kept ) ) : $node->removeAttribute( 'allow' );
+        }
+
         if( in_array( $tag, ['iframe', 'frame'], true ) ) {
-            $node->setAttribute( 'sandbox', 'allow-scripts allow-same-origin allow-popups' );
+            // No allow-same-origin: together with allow-scripts it lets
+            // same-origin framed content remove its own sandbox and escape.
+            // (Browsers ignore the attribute on <frame>, which cannot be
+            // sandboxed — avoid allowing <frame> for untrusted origins.)
+            $node->setAttribute( 'sandbox', 'allow-scripts allow-popups' );
         }
     }
 

@@ -450,7 +450,8 @@ class SaneTest extends TestCase
     {
         $html = '<iframe src="https://www.youtube.com/embed/abc"></iframe>';
         $result = Sane::html( $html, ['iframe' => ['https://www.youtube.com/embed/']] );
-        $this->assertStringContainsString( 'sandbox="allow-scripts allow-same-origin allow-popups"', $result );
+        $this->assertStringContainsString( 'sandbox="allow-scripts allow-popups"', $result );
+        $this->assertStringNotContainsString( 'allow-same-origin', $result );
     }
 
 
@@ -788,7 +789,8 @@ class SaneTest extends TestCase
     {
         $html = '<iframe src="https://www.youtube.com/embed/abc"></iframe>';
         $result = Sane::html( $html, ['iframe' => true] );
-        $this->assertStringContainsString( 'sandbox="allow-scripts allow-same-origin allow-popups"', $result );
+        $this->assertStringContainsString( 'sandbox="allow-scripts allow-popups"', $result );
+        $this->assertStringNotContainsString( 'allow-same-origin', $result );
     }
 
 
@@ -893,5 +895,106 @@ class SaneTest extends TestCase
     {
         $result = Sane::html( '<script src="data:text/javascript,alert(1)"></script>', ['script' => true] );
         $this->assertStringNotContainsString( '<script', $result );
+    }
+
+
+    // ── Sandbox does not include allow-same-origin ──
+
+    public function testSandboxOmitsAllowSameOrigin() : void
+    {
+        $result = Sane::html( '<iframe src="/embed/widget"></iframe>', ['iframe' => ['/embed/']] );
+        $this->assertStringContainsString( 'sandbox="allow-scripts allow-popups"', $result );
+        $this->assertStringNotContainsString( 'allow-same-origin', $result );
+    }
+
+
+    // ── meta refresh control-character bypass ──
+
+    public function testBlocksMetaRefreshWithEmbeddedTab() : void
+    {
+        $result = Sane::html( '<meta http-equiv="refresh" content="0;url=java&#9;script:alert(1)">', ['meta' => true] );
+        $this->assertStringNotContainsString( 'content=', $result );
+    }
+
+
+    // ── base=true hijacking ──
+
+    public function testBaseTrueStripsProtocolRelativeHref() : void
+    {
+        $result = Sane::html( '<base href="//evil.com/">', ['base' => true] );
+        $this->assertStringNotContainsString( 'evil.com', $result );
+    }
+
+
+    public function testBaseTrueStripsAbsoluteHref() : void
+    {
+        $result = Sane::html( '<base href="https://evil.com/">', ['base' => true] );
+        $this->assertStringNotContainsString( 'evil.com', $result );
+    }
+
+
+    public function testBaseTrueKeepsRelativeHref() : void
+    {
+        $result = Sane::html( '<base href="/app/">', ['base' => true] );
+        $this->assertStringContainsString( 'href="/app/"', $result );
+    }
+
+
+    public function testBaseUriListKeepsAllowedAbsoluteHref() : void
+    {
+        $result = Sane::html( '<base href="https://example.com/">', ['base' => ['https://example.com/']] );
+        $this->assertStringContainsString( 'href="https://example.com/"', $result );
+    }
+
+
+    // ── iframe allow attribute is restricted to safe features ──
+
+    public function testIframeAllowDropsDangerousFeatures() : void
+    {
+        $html = '<iframe src="https://yt.com/e/x" allow="camera; microphone; geolocation"></iframe>';
+        $result = Sane::html( $html, ['iframe' => ['https://yt.com/']] );
+        $this->assertStringNotContainsString( 'camera', $result );
+        $this->assertStringNotContainsString( 'microphone', $result );
+        $this->assertStringNotContainsString( 'geolocation', $result );
+    }
+
+
+    public function testIframeAllowKeepsSafeFeatures() : void
+    {
+        $html = '<iframe src="https://yt.com/e/x" allow="autoplay; camera; fullscreen"></iframe>';
+        $result = Sane::html( $html, ['iframe' => ['https://yt.com/']] );
+        $this->assertStringContainsString( 'autoplay', $result );
+        $this->assertStringContainsString( 'fullscreen', $result );
+        $this->assertStringNotContainsString( 'camera', $result );
+    }
+
+
+    // ── Embedding-element denylist additions ──
+
+    public function testRemovesPortal() : void
+    {
+        $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><portal src="https://evil.com/"></portal>' ) );
+    }
+
+
+    public function testRemovesApplet() : void
+    {
+        $this->assertSame( '<p>ok</p>', self::sanitize( '<p>ok</p><applet code="Evil.class"></applet>' ) );
+    }
+
+
+    // ── Expanded DOM-clobbering denylist ──
+
+    public function testRemovesIdCookie() : void
+    {
+        $result = Sane::html( '<div id="cookie">x</div>' );
+        $this->assertStringNotContainsString( 'id=', $result );
+    }
+
+
+    public function testRemovesNameBody() : void
+    {
+        $result = Sane::html( '<form action="https://example.com"><input name="body"></form>', ['form' => ['https://example.com']] );
+        $this->assertStringNotContainsString( 'name="body"', $result );
     }
 }
