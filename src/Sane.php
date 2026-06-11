@@ -9,6 +9,12 @@ class Sane
     /** @var list<string> */
     private static array $removeElements = ['base', 'embed', 'form', 'frame', 'iframe', 'link', 'math', 'meta', 'noscript', 'object', 'script', 'style', 'svg', 'template'];
 
+    // SVG/SMIL animation elements that can set other attributes to dangerous
+    // values (e.g. <animate attributeName="href" to="javascript:...">); always
+    // removed, even inside an allowed <svg>. Matched case-insensitively.
+    /** @var list<string> */
+    private static array $animationElements = ['animate', 'animatemotion', 'animatetransform', 'animatecolor', 'set'];
+
     // Attributes that may contain URIs
     /** @var list<string> */
     private static array $uriAttributes = [
@@ -55,6 +61,17 @@ class Sane
 
 
     /**
+     * Sanitizes the HTML input, removing potentially dangerous content.
+     *
+     * The $allow map opts specific blocked elements back in, keyed by tag name:
+     * - true keeps the element regardless of its URL. The global passes still
+     *   strip event handlers, "style" attributes and dangerous-scheme URLs, but
+     *   for tags carrying executable inline content (e.g. script, style) that
+     *   content is kept verbatim — only pass true for tags you fully trust.
+     * - list<string> keeps the element only when its URL starts with one of the
+     *   given prefixes; embedding tags are additionally reduced to a safe
+     *   attribute allow-list and sandboxed.
+     *
      * @param array<string, bool|list<string>> $allow
      */
     public static function html( string $input, array $allow = [] ) : string
@@ -83,6 +100,18 @@ class Sane
                 continue;
             }
             foreach ($nodes as $node) {
+                if( $node instanceof \DOMNode ) {
+                    $node->parentNode?->removeChild($node);
+                }
+            }
+        }
+
+        // --- 1b. Remove SVG/SMIL animation elements (even inside an allowed svg) ---
+        $lname = "translate(local-name(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')";
+        $conds = array_map( fn( $el ) => "{$lname}='{$el}'", self::$animationElements );
+        $animNodes = $xpath->query('//*[' . implode( ' or ', $conds ) . ']');
+        if( $animNodes !== false ) {
+            foreach ($animNodes as $node) {
                 if( $node instanceof \DOMNode ) {
                     $node->parentNode?->removeChild($node);
                 }
@@ -129,30 +158,55 @@ class Sane
         }
 
         // --- 5. Remove attributes with disallowed URI schemes ---
-        foreach (self::$uriAttributes as $attr) {
-            $nodesWithAttr = $xpath->query('//*[@*[local-name()="' . $attr . '"]]');
-            if( $nodesWithAttr === false ) {
-                continue;
-            }
-            foreach ($nodesWithAttr as $node) {
+        $uriNodes = $xpath->query('//*');
+        if( $uriNodes !== false ) {
+            foreach ($uriNodes as $node) {
                 if( !$node instanceof \DOMElement ) {
                     continue;
                 }
-                // getAttribute() already returns the entity-decoded value the
-                // browser sees; decoding again would judge a different string
-                // than the one kept in the output.
-                $value = trim($node->getAttribute($attr));
-
-                if ($attr === 'srcset') {
-                    foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
-                        $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
-                        if (self::isBlockedUri($url)) {
-                            $node->removeAttribute($attr);
-                            break;
-                        }
+                $blocked = [];
+                foreach ($node->attributes as $attribute) {
+                    // Match the full and local name so namespaced URI attributes
+                    // such as xlink:href (local name "href") are checked too.
+                    if( !in_array($attribute->name, self::$uriAttributes, true)
+                        && !in_array($attribute->localName, self::$uriAttributes, true)
+                    ) {
+                        continue;
                     }
-                } elseif (self::isBlockedUri($value)) {
-                    $node->removeAttribute($attr);
+                    // The attribute value is already entity-decoded to what the
+                    // browser sees, so it is checked as-is.
+                    $value = trim($attribute->value);
+
+                    if ($attribute->localName === 'srcset') {
+                        foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
+                            $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
+                            if (self::isBlockedUri($url)) {
+                                $blocked[] = $attribute;
+                                break;
+                            }
+                        }
+                    } elseif (self::isBlockedUri($value)) {
+                        $blocked[] = $attribute;
+                    }
+                }
+                foreach ($blocked as $attribute) {
+                    $node->removeAttributeNode($attribute);
+                }
+            }
+        }
+
+        // --- 5b. Neutralize <meta http-equiv="refresh"> redirects to blocked schemes ---
+        $metaNodes = $xpath->query('//meta[@content]');
+        if( $metaNodes !== false ) {
+            foreach ($metaNodes as $node) {
+                if( !$node instanceof \DOMElement ) {
+                    continue;
+                }
+                if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
+                    && preg_match('/url\s*=\s*["\']?\s*([^"\'\s>]+)/i', $node->getAttribute('content'), $m)
+                    && self::isBlockedUri($m[1])
+                ) {
+                    $node->removeAttribute('content');
                 }
             }
         }

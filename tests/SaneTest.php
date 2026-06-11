@@ -817,4 +817,55 @@ class SaneTest extends TestCase
         $result = Sane::html( '<form action="https://example.com" target="_blank"></form>', ['form' => true] );
         $this->assertStringContainsString( 'noopener', $result );
     }
+
+
+    // ── Namespaced URI attributes (xlink:href) ──
+
+    public function testBlocksXlinkHrefJavascriptInSvg() : void
+    {
+        $result = Sane::html( '<svg><a xlink:href="javascript:alert(1)"><text>x</text></a></svg>', ['svg' => true] );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+        $this->assertStringContainsString( '<svg', $result );
+    }
+
+
+    public function testBlocksHrefJavascriptInSvg() : void
+    {
+        $result = Sane::html( '<svg><image href="vbscript:bad"/></svg>', ['svg' => true] );
+        $this->assertStringNotContainsString( 'vbscript', strtolower( $result ) );
+    }
+
+
+    // ── SVG/SMIL animation elements ──
+
+    public function testRemovesSvgAnimateElement() : void
+    {
+        $result = Sane::html( '<svg><a><animate attributeName="href" to="javascript:alert(1)"/></a></svg>', ['svg' => true] );
+        $this->assertStringNotContainsString( 'animate', strtolower( $result ) );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+    }
+
+
+    public function testRemovesSvgSetAndAnimateTransform() : void
+    {
+        $result = Sane::html( '<svg><set attributeName="onclick" to="alert(1)"/><animateTransform attributeName="x"/></svg>', ['svg' => true] );
+        $this->assertStringNotContainsString( '<set', strtolower( $result ) );
+        $this->assertStringNotContainsString( 'animatetransform', strtolower( $result ) );
+    }
+
+
+    // ── meta http-equiv="refresh" ──
+
+    public function testBlocksMetaRefreshJavascript() : void
+    {
+        $result = Sane::html( '<meta http-equiv="refresh" content="0;url=javascript:alert(1)">', ['meta' => true] );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+    }
+
+
+    public function testKeepsLegitMetaContent() : void
+    {
+        $result = Sane::html( '<meta name="viewport" content="width=device-width">', ['meta' => true] );
+        $this->assertStringContainsString( 'width=device-width', $result );
+    }
 }
