@@ -224,7 +224,7 @@ class Sane
                     // browser sees, so it is checked as-is.
                     $value = trim($attribute->value);
 
-                    if ($attribute->localName === 'srcset') {
+                    if ($local === 'srcset') {
                         foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
                             $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
                             if (self::isBlockedUri($url)) {
@@ -389,11 +389,10 @@ class Sane
             if( !$node instanceof \DOMElement ) {
                 continue;
             }
-            // Normalize like a browser (strip TAB/CR/LF and leading control
-            // chars, treat backslashes as slashes) so "\\evil", "/\evil" and
-            // "ht&#9;tps://evil" can't slip past the cross-origin test below.
-            $href = str_replace('\\', '/', (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('href')));
-            $href = (string) preg_replace('/^[\x00-\x20]+/', '', $href);
+            // Normalize like a browser (strip control chars, treat backslashes
+            // as slashes) so "\\evil", "/\evil" and "ht&#9;tps://evil" can't slip
+            // past the cross-origin test below.
+            $href = str_replace('\\', '/', self::stripUrlControlChars( $node->getAttribute('href') ));
 
             if( str_starts_with($href, '//') || preg_match('#^[a-zA-Z][a-zA-Z0-9+.-]*:#', $href) ) {
                 $node->removeAttribute('href');
@@ -443,12 +442,12 @@ class Sane
 
         foreach( $node->attributes as $attr ) {
             if( !in_array( $attr->name, $safe, true ) ) {
-                $attrsToRemove[] = $attr->name;
+                $attrsToRemove[] = $attr;
             }
         }
 
-        foreach( $attrsToRemove as $name ) {
-            $node->removeAttribute( $name );
+        foreach( $attrsToRemove as $attr ) {
+            $node->removeAttributeNode( $attr );
         }
 
         // Restrict the iframe Permissions-Policy "allow" attribute to safe
@@ -462,7 +461,11 @@ class Sane
                     $kept[] = $directive;
                 }
             }
-            $kept ? $node->setAttribute( 'allow', implode( '; ', $kept ) ) : $node->removeAttribute( 'allow' );
+            if( $kept ) {
+                $node->setAttribute( 'allow', implode( '; ', $kept ) );
+            } else {
+                $node->removeAttribute( 'allow' );
+            }
         }
 
         if( in_array( $tag, ['iframe', 'frame'], true ) ) {
@@ -633,14 +636,23 @@ class Sane
     }
 
 
+    /**
+     * Removes the characters a browser strips from a URL before resolving its
+     * scheme: TAB/LF/CR anywhere, plus leading control characters and whitespace.
+     */
+    private static function stripUrlControlChars( string $value ) : string
+    {
+        $value = (string) preg_replace('/[\x09\x0a\x0d]/', '', $value);
+        return (string) preg_replace('/^[\x00-\x20]+/', '', $value);
+    }
+
+
     private static function isBlockedUri( string $value ) : bool
     {
-        // Browsers strip TAB, LF and CR from anywhere in a URL and ignore
-        // leading control characters/whitespace before resolving the scheme.
-        // Normalize the same way so payloads like "java&#9;script:" or a
-        // leading "\x01javascript:" cannot slip past the scheme detection.
-        $value = (string) preg_replace('/[\x09\x0a\x0d]+/', '', $value);
-        $value = (string) preg_replace('/^[\x00-\x20]+/', '', $value);
+        // Normalize the way a browser does before resolving the scheme, so
+        // payloads like "java&#9;script:" or a leading "\x01javascript:" can't
+        // slip past the scheme detection below.
+        $value = self::stripUrlControlChars( $value );
 
         if (!preg_match('/^([a-zA-Z][a-zA-Z0-9+.-]*):/', $value, $matches)) {
             return false;
