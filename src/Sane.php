@@ -115,7 +115,7 @@ class Sane
 
         $xpath = new \DOMXPath($doc);
 
-        // --- 1. Remove all unsafe elements (skip those with allowed URIs) ---
+        // --- Opt allowed elements back in (hardened); collect the rest for removal ---
         $removeSet = [];
         foreach (self::$removeElements as $tag) {
             if( isset( $allow[$tag] ) ) {
@@ -131,68 +131,54 @@ class Sane
             }
             $removeSet[$tag] = true;
         }
-        if( $removeSet !== [] ) {
-            $nodes = $xpath->query('//*');
-            if( $nodes !== false ) {
-                foreach ($nodes as $node) {
-                    if( $node instanceof \DOMElement && isset( $removeSet[$node->nodeName] ) ) {
-                        $node->parentNode?->removeChild($node);
+        // --- Collapse any kept <noscript> to its text content. Browsers with
+        //     scripting enabled parse noscript content as raw text, so a stray
+        //     </noscript> in an attribute would re-open parsing in the browser
+        //     and free the following markup. Only reachable when noscript is
+        //     allowed (otherwise it was collected for removal above). ---
+        if( isset( $allow['noscript'] ) ) {
+            $noscriptNodes = $xpath->query('//noscript');
+            if( $noscriptNodes !== false ) {
+                foreach ($noscriptNodes as $node) {
+                    if( !$node instanceof \DOMElement || !$node->hasChildNodes() ) {
+                        continue;
+                    }
+                    $text = $node->textContent;
+                    while( $node->firstChild !== null ) {
+                        $node->removeChild( $node->firstChild );
+                    }
+                    if( $text !== '' ) {
+                        $node->appendChild( $doc->createTextNode( $text ) );
                     }
                 }
             }
         }
 
-        // --- 1b. Remove script-bearing SVG elements (even inside an allowed svg) ---
-        $lname = "translate(local-name(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')";
-        $conds = array_map( fn( $el ) => "{$lname}='{$el}'", self::$unsafeSvgElements );
-        $animNodes = $xpath->query('//*[' . implode( ' or ', $conds ) . ']');
-        if( $animNodes !== false ) {
-            foreach ($animNodes as $node) {
-                if( $node instanceof \DOMNode ) {
+        // --- Single pass over every node: remove comments, unsafe elements and
+        //     script-bearing SVG elements, then on surviving elements strip
+        //     event-handler/style/dangerous-URI and clobbering id/name attributes
+        //     and add rel="noopener noreferrer" to target="_blank" links. ---
+        $animSet = array_flip( self::$unsafeSvgElements );
+        $blockedSet = array_flip( self::$blockedNames );
+        $uriSet = array_flip( self::$uriAttributes );
+        $nodes = $xpath->query('//comment() | //*');
+        if( $nodes !== false ) {
+            foreach ($nodes as $node) {
+                if( $node instanceof \DOMComment ) {
                     $node->parentNode?->removeChild($node);
-                }
-            }
-        }
-
-        // --- 1c. Collapse any kept <noscript> to its text content. Browsers with
-        //         scripting enabled parse noscript content as raw text, but the
-        //         parser here builds a DOM, so a stray </noscript> in an attribute
-        //         would re-open parsing in the browser and free following markup. ---
-        $noscriptNodes = $xpath->query('//noscript');
-        if( $noscriptNodes !== false ) {
-            foreach ($noscriptNodes as $node) {
-                if( !$node instanceof \DOMElement || !$node->hasChildNodes() ) {
                     continue;
                 }
-                $text = $node->textContent;
-                while( $node->firstChild !== null ) {
-                    $node->removeChild( $node->firstChild );
-                }
-                if( $text !== '' ) {
-                    $node->appendChild( $doc->createTextNode( $text ) );
-                }
-            }
-        }
-
-        // --- 2. Remove HTML comments ---
-        $comments = $xpath->query('//comment()');
-        if( $comments !== false ) {
-            foreach ($comments as $comment) {
-                if( $comment instanceof \DOMNode ) {
-                    $comment->parentNode?->removeChild($comment);
-                }
-            }
-        }
-
-        // --- 3-5. Strip event-handler (on*), style and dangerous-scheme URI
-        //          attributes in a single pass over all elements ---
-        $allElements = $xpath->query('//*');
-        if( $allElements !== false ) {
-            foreach ($allElements as $node) {
                 if( !$node instanceof \DOMElement ) {
                     continue;
                 }
+                $tag = $node->nodeName;
+                if( isset( $removeSet[$tag] ) || isset( $animSet[strtolower($tag)] ) ) {
+                    $node->parentNode?->removeChild($node);
+                    continue;
+                }
+
                 $remove = [];
+                $blankTarget = false;
                 foreach ($node->attributes as $attribute) {
                     $name = $attribute->name;
 
@@ -200,12 +186,22 @@ class Sane
                         $remove[] = $attribute;
                         continue;
                     }
+                    if( $name === 'id' || $name === 'name' ) {
+                        // DOM clobbering: drop id/name shadowing a window/document property
+                        if( isset( $blockedSet[$attribute->value] ) ) {
+                            $remove[] = $attribute;
+                        }
+                        continue;
+                    }
+                    if( $name === 'target' && $attribute->value === '_blank' ) {
+                        $blankTarget = true;
+                        continue;
+                    }
 
                     // Match the full and local name so namespaced URI attributes
                     // such as xlink:href (local name "href") are checked too.
-                    if( !in_array($name, self::$uriAttributes, true)
-                        && !in_array($attribute->localName, self::$uriAttributes, true)
-                    ) {
+                    $local = $attribute->localName;
+                    if( !isset( $uriSet[$name] ) && ( $local === null || !isset( $uriSet[$local] ) ) ) {
                         continue;
                     }
                     // The attribute value is already entity-decoded to what the
@@ -227,63 +223,8 @@ class Sane
                 foreach ($remove as $attribute) {
                     $node->removeAttributeNode($attribute);
                 }
-            }
-        }
 
-        // --- 5b. Neutralize <meta http-equiv="refresh"> redirects to blocked schemes ---
-        $metaNodes = $xpath->query('//meta[@content]');
-        if( $metaNodes !== false ) {
-            foreach ($metaNodes as $node) {
-                if( !$node instanceof \DOMElement ) {
-                    continue;
-                }
-                // Strip TAB/CR/LF first so an embedded control char can't hide
-                // the scheme from the URL extraction below (browsers strip them).
-                $content = (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('content'));
-                // The redirect URL follows the time and a separator (";", "," or
-                // whitespace), with an optional "url=" prefix — handle every form.
-                if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
-                    && preg_match('/^\s*[\d.]*\s*[;,]?\s*(?:url\s*=\s*)?["\']?\s*([^"\'\s>]+)/i', $content, $m)
-                    && self::isBlockedUri($m[1])
-                ) {
-                    $node->removeAttribute('content');
-                }
-            }
-        }
-
-        // --- 5c. Drop inline scripts; an allowed <script> is only kept when it
-        //         loads from an external src that survived the scheme check ---
-        $scriptNodes = $xpath->query('//script');
-        if( $scriptNodes !== false ) {
-            foreach ($scriptNodes as $node) {
-                if( $node instanceof \DOMElement && trim($node->getAttribute('src')) === '' ) {
-                    $node->parentNode?->removeChild($node);
-                }
-            }
-        }
-
-        // --- 6. Prevent DOM clobbering by removing dangerous id/name attributes ---
-        $blockedSet = array_flip( self::$blockedNames );
-        $clobberNodes = $xpath->query('//*[@id or @name]');
-        if( $clobberNodes !== false ) {
-            foreach ($clobberNodes as $node) {
-                if( !$node instanceof \DOMElement ) {
-                    continue;
-                }
-                if( $node->hasAttribute('id') && isset( $blockedSet[$node->getAttribute('id')] ) ) {
-                    $node->removeAttribute('id');
-                }
-                if( $node->hasAttribute('name') && isset( $blockedSet[$node->getAttribute('name')] ) ) {
-                    $node->removeAttribute('name');
-                }
-            }
-        }
-
-        // --- 7. Add rel="noopener noreferrer" to target="_blank" links ---
-        $blankLinks = $xpath->query('//a[@target="_blank"] | //area[@target="_blank"] | //form[@target="_blank"]');
-        if( $blankLinks !== false ) {
-            foreach ($blankLinks as $node) {
-                if( $node instanceof \DOMElement ) {
+                if( $blankTarget && ($tag === 'a' || $tag === 'area' || $tag === 'form') ) {
                     $rel = preg_split('/\s+/', trim($node->getAttribute('rel')), -1, PREG_SPLIT_NO_EMPTY) ?: [];
                     foreach (['noopener', 'noreferrer'] as $token) {
                         if( !in_array($token, $rel, true) ) {
@@ -291,6 +232,44 @@ class Sane
                         }
                     }
                     $node->setAttribute('rel', implode(' ', $rel));
+                }
+            }
+        }
+
+        // --- Neutralize <meta http-equiv="refresh"> redirects to blocked schemes.
+        //     Only reachable when meta is allowed. ---
+        if( isset( $allow['meta'] ) ) {
+            $metaNodes = $xpath->query('//meta[@content]');
+            if( $metaNodes !== false ) {
+                foreach ($metaNodes as $node) {
+                    if( !$node instanceof \DOMElement ) {
+                        continue;
+                    }
+                    // Strip TAB/CR/LF first so an embedded control char can't hide
+                    // the scheme from the URL extraction below (browsers strip them).
+                    $content = (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('content'));
+                    // The redirect URL follows the time and a separator (";", "," or
+                    // whitespace), with an optional "url=" prefix — handle every form.
+                    if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
+                        && preg_match('/^\s*[\d.]*\s*[;,]?\s*(?:url\s*=\s*)?["\']?\s*([^"\'\s>]+)/i', $content, $m)
+                        && self::isBlockedUri($m[1])
+                    ) {
+                        $node->removeAttribute('content');
+                    }
+                }
+            }
+        }
+
+        // --- Drop inline scripts; an allowed <script> is only kept when it loads
+        //     from an external src that survived the scheme check. Only reachable
+        //     when script is allowed. ---
+        if( isset( $allow['script'] ) ) {
+            $scriptNodes = $xpath->query('//script');
+            if( $scriptNodes !== false ) {
+                foreach ($scriptNodes as $node) {
+                    if( $node instanceof \DOMElement && trim($node->getAttribute('src')) === '' ) {
+                        $node->parentNode?->removeChild($node);
+                    }
                 }
             }
         }
