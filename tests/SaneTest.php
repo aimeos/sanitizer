@@ -1295,4 +1295,130 @@ class SaneTest extends TestCase
     {
         $this->assertSame( 'hello world', self::sanitize( '<![CDATA[hello world]]>' ) );
     }
+
+
+    // ── Embedded C0 control chars must not smuggle a blocked scheme ──
+    // libxml's saveHTML drops C0 controls on serialize, so a value the scheme
+    // check let through can re-form as a live "javascript:"/"data:" URL.
+
+    public function testBlocksJavascriptWithEmbeddedControlChar() : void
+    {
+        foreach (["\x01", "\x02", "\x08", "\x0b", "\x0e", "\x1f", "\x7f"] as $ctrl) {
+            $result = Sane::html( '<a href="java' . $ctrl . 'script:alert(1)">click</a>' );
+            $this->assertStringNotContainsString(
+                'javascript', strtolower( str_replace( $ctrl, '', $result ) ),
+                'control char 0x' . bin2hex( $ctrl ) . ' must not smuggle javascript:'
+            );
+        }
+    }
+
+
+    public function testBlocksDataSvgXmlWithEmbeddedControlChar() : void
+    {
+        $result = Sane::html( "<img src=\"da\x0bta:image/svg+xml,<svg onload=alert(1)>\">" );
+        $this->assertStringNotContainsString( 'svg+xml', str_replace( "\x0b", '', $result ) );
+    }
+
+
+    public function testBlocksDataTextHtmlWithEmbeddedControlChar() : void
+    {
+        $result = Sane::html( "<img src=\"da\x01ta:text/html,<script>alert(1)</script>\">" );
+        $this->assertStringNotContainsString( 'text/html', str_replace( "\x01", '', $result ) );
+    }
+
+
+    public function testBlocksMetaRefreshWithEmbeddedControlChar() : void
+    {
+        $result = Sane::html( "<meta http-equiv=\"refresh\" content=\"0;url=java\x0bscript:alert(1)\">", ['meta' => true] );
+        $this->assertStringNotContainsString( 'javascript', strtolower( str_replace( "\x0b", '', $result ) ) );
+    }
+
+
+    public function testBaseTrueStripsAbsoluteHrefWithEmbeddedControlChar() : void
+    {
+        $result = Sane::html( "<base href=\"htt\x0bps://evil.com/\">", ['base' => true] );
+        $this->assertStringNotContainsString( 'evil.com', str_replace( "\x0b", '', $result ) );
+    }
+
+
+    public function testAllowedIframeBlocksJavascriptSrcWithEmbeddedControlChar() : void
+    {
+        $result = Sane::html( "<iframe src=\"java\x01script:alert(1)\"></iframe>", ['iframe' => true] );
+        $this->assertStringNotContainsString( 'javascript', strtolower( str_replace( "\x01", '', $result ) ) );
+    }
+
+
+    // ── RAWTEXT end-tag breakout in allowed <style>/<script> ──
+    // A browser ends a raw-text element at "</style"/"</script" + space/"/"/">",
+    // but the parser only ends on the exact "</style>"; libxml emits the content
+    // unescaped, so the trailing markup must not survive as a live element.
+
+    public function testAllowStyleNeutralizesEndTagSlashBreakout() : void
+    {
+        $result = Sane::html( '<style></style/><img src=x onerror=alert(1)>', ['style' => true] );
+        $this->assertStringNotContainsString( 'onerror', $result );
+        $this->assertStringNotContainsString( '<img', $result );
+    }
+
+
+    public function testAllowStyleNeutralizesEndTagAttrBreakout() : void
+    {
+        $result = Sane::html( '<style></style foo><img src=x onerror=alert(1)>', ['style' => true] );
+        $this->assertStringNotContainsString( 'onerror', $result );
+    }
+
+
+    public function testAllowScriptNeutralizesEndTagBreakout() : void
+    {
+        $html = '<script src="https://cdn.example.com/a.js"></script foo><img src=x onerror=alert(1)>';
+        $result = Sane::html( $html, ['script' => true] );
+        $this->assertStringNotContainsString( 'onerror', $result );
+    }
+
+
+    public function testAllowStyleKeepsBenignCssWithSlash() : void
+    {
+        // "/" in CSS that is not part of a "</style" end tag must not trip the guard
+        $result = Sane::html( '<style>a{background:url(/x.png)}</style>', ['style' => true] );
+        $this->assertStringContainsString( 'url(/x.png)', $result );
+    }
+
+
+    // ── target="_blank" keyword is matched case-insensitively (tabnabbing) ──
+
+    public function testAddsRelToUppercaseTargetBlank() : void
+    {
+        $result = Sane::html( '<a href="https://example.com" target="_BLANK">link</a>' );
+        $this->assertStringContainsString( 'rel="noopener noreferrer"', $result );
+    }
+
+
+    public function testAddsRelToMixedCaseTargetBlank() : void
+    {
+        $result = Sane::html( '<a href="https://example.com" target="_Blank">link</a>' );
+        $this->assertStringContainsString( 'noopener', $result );
+    }
+
+
+    // ── cite / longdesc are scheme-checked ──
+
+    public function testBlocksJavascriptInCite() : void
+    {
+        $result = Sane::html( '<blockquote cite="javascript:alert(1)">x</blockquote>' );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+    }
+
+
+    public function testBlocksJavascriptInLongdesc() : void
+    {
+        $result = Sane::html( '<img src="y.png" longdesc="javascript:alert(1)">' );
+        $this->assertStringNotContainsString( 'javascript', strtolower( $result ) );
+    }
+
+
+    public function testKeepsHttpsCite() : void
+    {
+        $result = Sane::html( '<blockquote cite="https://example.com/q">x</blockquote>' );
+        $this->assertStringContainsString( 'cite="https://example.com/q"', $result );
+    }
 }

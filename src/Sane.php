@@ -19,7 +19,8 @@ class Sane
     // Attributes that may contain URIs
     /** @var list<string> */
     private static array $uriAttributes = [
-        'href', 'src', 'xlink:href', 'formaction', 'action', 'background', 'poster', 'ping', 'srcset', 'data'
+        'href', 'src', 'xlink:href', 'formaction', 'action', 'background', 'poster', 'ping', 'srcset', 'data',
+        'cite', 'longdesc'
     ];
 
     // Disallowed URI schemes
@@ -129,6 +130,9 @@ class Sane
 
         self::sanitizeNodes( $xpath, $removeSet );
 
+        if( isset( $allow['style'] ) || isset( $allow['script'] ) ) {
+            self::dropRawTextBreakouts( $xpath );
+        }
         if( isset( $allow['meta'] ) ) {
             self::checkMetaRefresh( $xpath );
         }
@@ -262,8 +266,13 @@ class Sane
                     }
                     continue;
                 }
-                if( $name === 'target' && $attribute->value === '_blank' ) {
-                    $blankTarget = true;
+                if( $name === 'target' ) {
+                    // Match "_blank" case-insensitively: the browsing-context
+                    // keyword is ASCII case-insensitive, so "_BLANK"/"_Blank" still
+                    // open a new context and must get the rel hardening below.
+                    if( strcasecmp( trim( $attribute->value ), '_blank' ) === 0 ) {
+                        $blankTarget = true;
+                    }
                     continue;
                 }
 
@@ -320,9 +329,11 @@ class Sane
             if( !$node instanceof \DOMElement ) {
                 continue;
             }
-            // Strip TAB/CR/LF first so an embedded control char can't hide the
-            // scheme from the URL extraction below (browsers strip them).
-            $content = (string) preg_replace('/[\x09\x0a\x0d]/', '', $node->getAttribute('content'));
+            // Strip every C0 control char (and DEL) first: an embedded control
+            // would otherwise terminate the URL extraction below early (\s in the
+            // pattern matches VT/FF), hiding the real scheme — and libxml drops
+            // those bytes on serialize, re-forming the scheme in the browser.
+            $content = (string) preg_replace('/[\x00-\x1f\x7f]/', '', $node->getAttribute('content'));
             // The redirect URL follows the time and a separator (";", "," or
             // whitespace), with an optional "url=" prefix — handle every form.
             if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
@@ -330,6 +341,35 @@ class Sane
                 && self::isBlockedUri($m[1])
             ) {
                 $node->removeAttribute('content');
+            }
+        }
+    }
+
+
+    /**
+     * Drops kept <style>/<script> elements whose raw-text content would let a
+     * browser break out of the element. The Masterminds parser only ends these
+     * raw-text elements on the exact "</style>"/"</script>", but the HTML5 spec
+     * (and every browser) also ends them at "</style"/"</script" followed by
+     * whitespace, "/" or ">". Such a stray end tag therefore stays inert raw text
+     * here — so the markup after it is never sanitized — while libxml emits
+     * style/script content unescaped, freeing it as live elements on reparse
+     * (e.g. "<style></style/><img src=x onerror=alert(1)>"). Only reachable when
+     * style or script is allowed.
+     */
+    private static function dropRawTextBreakouts( \DOMXPath $xpath ) : void
+    {
+        $nodes = $xpath->query('//style | //script');
+        if( $nodes === false ) {
+            return;
+        }
+        foreach( $nodes as $node ) {
+            if( !$node instanceof \DOMElement ) {
+                continue;
+            }
+            $tag = strtolower( $node->nodeName );
+            if( preg_match( '#</' . $tag . '[\s/>]#i', $node->textContent ) ) {
+                $node->parentNode?->removeChild( $node );
             }
         }
     }
@@ -715,12 +755,18 @@ class Sane
 
 
     /**
-     * Removes the characters a browser strips from a URL before resolving its
-     * scheme: TAB/LF/CR anywhere, plus leading control characters and whitespace.
+     * Normalizes a URL to what the scheme actually resolves to after serialization.
+     * Browsers strip only TAB/LF/CR from URLs, but libxml's saveHTML drops every C0
+     * control character when it serializes the attribute, so a value like
+     * "java<0x01>script:" passes a naive scheme check yet is emitted as a live
+     * "javascript:" URL. Removing all C0 controls (and DEL) anywhere — plus leading
+     * control characters and whitespace — keeps the scheme check in sync with the
+     * serialized output and can only make detection stricter (no valid URL contains
+     * a raw control byte).
      */
     private static function stripUrlControlChars( string $value ) : string
     {
-        $value = (string) preg_replace('/[\x09\x0a\x0d]/', '', $value);
+        $value = (string) preg_replace('/[\x00-\x1f\x7f]/', '', $value);
         return (string) preg_replace('/^[\x00-\x20]+/', '', $value);
     }
 
