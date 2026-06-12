@@ -1421,4 +1421,259 @@ class SaneTest extends TestCase
         $result = Sane::html( '<blockquote cite="https://example.com/q">x</blockquote>' );
         $this->assertStringContainsString( 'cite="https://example.com/q"', $result );
     }
+
+
+    // ── DoS: a "/>" hidden in a quoted/unquoted attribute value must not pose as a
+    // self-closing tag and sneak deep foreign-content nesting past the depth guard ──
+
+    public function testRejectsQuotedSelfCloseDepthBypass() : void
+    {
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( '<svg>' . str_repeat( '<g x="a/>b">', 8000 ) . '</svg>', ['svg' => true] ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start, 'quoted-attr self-close nesting must be rejected fast' );
+    }
+
+
+    public function testRejectsMathQuotedSelfCloseDepthBypass() : void
+    {
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( '<math>' . str_repeat( '<mi x="a/>b">', 8000 ) . '</math>', ['math' => true] ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testRejectsUnquotedSelfCloseDepthBypass() : void
+    {
+        // "<g a=b/>" is not self-closing ("b/" is the unquoted value), so it nests
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( '<svg>' . str_repeat( '<g a=b/>', 8000 ) . '</svg>', ['svg' => true] ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testKeepsGenuineSvgSelfClosingWithQuotedAttrs() : void
+    {
+        // the quote-aware scanner must still treat a real "/>" as a leaf
+        $result = Sane::html( '<svg>' . str_repeat( '<rect x="0" y="0"/>', 1500 ) . '</svg>', ['svg' => true] );
+        $this->assertStringContainsString( '<svg', $result );
+    }
+
+
+    public function testMalformedTagsWithoutCloseAreStillCounted() : void
+    {
+        // "<br<br<br…" expands to one element per "<br"; the element cap must reject it
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( str_repeat( '<br', 100000 ) ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    // ── DoS: a flood of stray "<" hits the parser's O(n^2) character path ──
+
+    public function testRejectsStrayLessThanFlood() : void
+    {
+        foreach (['<', '< ', '<1', '<='] as $unit) {
+            $start = microtime( true );
+            $this->assertSame( '', Sane::html( str_repeat( $unit, 500000 ) ), "stray '$unit' flood must be rejected" );
+            $this->assertLessThan( 1.0, microtime( true ) - $start, "stray '$unit' flood must be rejected fast" );
+        }
+    }
+
+
+    public function testAllowsBenignStrayLessThanInText() : void
+    {
+        $result = Sane::html( 'price < 5 and x < y so a<b' );
+        $this->assertStringContainsString( 'price', $result );
+    }
+
+
+    // ── DoS: a comment flood once made "//comment()" run in ~O(n^2) ──
+
+    public function testHandlesCommentFloodLinearly() : void
+    {
+        $start = microtime( true );
+        $result = Sane::html( str_repeat( '<!-- c -->', 100000 ) . '<p>ok</p>' );
+        $this->assertLessThan( 1.0, microtime( true ) - $start, 'comment flood must be handled in linear time' );
+        $this->assertStringNotContainsString( '<!--', $result );
+        $this->assertStringContainsString( '<p>ok</p>', $result );
+    }
+
+
+    public function testRemovesNestedComments() : void
+    {
+        $this->assertSame( '<div>text</div>', self::sanitize( '<div><!-- a -->text<!-- b --></div>' ) );
+    }
+
+
+    // ── Reverse tabnabbing: named targets and <base target> ──
+
+    public function testAddsRelToNamedTarget() : void
+    {
+        $result = Sane::html( '<a href="https://example.com" target="win1">x</a>' );
+        $this->assertStringContainsString( 'rel="noopener noreferrer"', $result );
+    }
+
+
+    public function testDoesNotAddRelToSelfParentTopTargets() : void
+    {
+        foreach (['_self', '_parent', '_top'] as $t) {
+            $result = Sane::html( '<a href="https://example.com" target="' . $t . '">x</a>' );
+            $this->assertStringNotContainsString( 'noopener', $result );
+        }
+    }
+
+
+    public function testStripsTargetFromBase() : void
+    {
+        $result = Sane::html( '<base target="_blank"><a href="https://example.com">x</a>', ['base' => true] );
+        $this->assertStringNotContainsString( 'target', $result );
+    }
+
+
+    // ── DoS: one element with a huge attribute list is ~O(n^2) in the parser ──
+
+    private static function manyAttrs( int $n, string $prefix ) : string
+    {
+        $html = '<a';
+        for ($i = 0; $i < $n; $i++) {
+            $html .= ' ' . $prefix . $i;
+        }
+        return $html . '>x</a>';
+    }
+
+
+    public function testRejectsAttributeFlood() : void
+    {
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( self::manyAttrs( 30000, 'data-x' ) ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start, 'attribute flood must be rejected fast' );
+    }
+
+
+    public function testRejectsDuplicateNameAttributeFlood() : void
+    {
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( '<a' . str_repeat( ' x', 200000 ) . '>' ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testRejectsSpreadAttributeFlood() : void
+    {
+        // many elements each with a large attribute list also blow up the parser
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( str_repeat( self::manyAttrs( 300, 'd' ), 2000 ) ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testKeepsElementWithModerateAttributeCount() : void
+    {
+        $result = Sane::html( self::manyAttrs( 100, 'data-x' ) );
+        $this->assertStringContainsString( 'data-x99', $result );
+    }
+
+
+    public function testAllowsManyElementsWithFewAttributes() : void
+    {
+        $result = Sane::html( str_repeat( '<input type="text" name="n" value="v" class="c">', 3000 ) );
+        $this->assertStringContainsString( '<input', $result );
+    }
+
+
+    // ── DoS: the pre-scan must not let a quoted/unquoted-value trick hide nesting
+    // or an attribute flood from the depth/attribute caps ──
+
+    public function testRejectsBareQuoteDepthBypass() : void
+    {
+        // a bare quote in attribute-name position must NOT swallow the nested tags
+        foreach (['"', "'"] as $q) {
+            $start = microtime( true );
+            $this->assertSame( '', Sane::html( '<a ' . $q . str_repeat( '<a>', 16000 ) ) );
+            $this->assertLessThan( 1.0, microtime( true ) - $start, "bare $q nesting bypass must be rejected fast" );
+        }
+    }
+
+
+    public function testRejectsUnquotedValueAttributeFlood() : void
+    {
+        // each " aN=1" is a distinct attribute; the run after an unquoted value
+        // must still be counted so the attribute-cost cap rejects the flood
+        $html = '<a';
+        for ($i = 0; $i < 30000; $i++) {
+            $html .= ' a' . $i . '=1';
+        }
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( $html . '>' ) );
+        $this->assertLessThan( 1.0, microtime( true ) - $start );
+    }
+
+
+    public function testAllowsBenignUnquotedAttributes() : void
+    {
+        $result = Sane::html( '<input type=text name=field value=hello>' );
+        $this->assertStringContainsString( 'value="hello"', $result );
+    }
+
+
+    // ── ReDoS: all-whitespace <meta refresh> content must not backtrack ──
+
+    public function testMetaRefreshWhitespaceContentIsLinear() : void
+    {
+        $html = str_repeat( '<meta http-equiv="refresh" content="' . str_repeat( ' ', 40 ) . '">', 5000 );
+        $start = microtime( true );
+        Sane::html( $html, ['meta' => true] );
+        $this->assertLessThan( 1.0, microtime( true ) - $start, 'whitespace meta content must not cause catastrophic backtracking' );
+    }
+
+
+    public function testMetaRefreshStillBlocksJavascriptAfterRedosFix() : void
+    {
+        foreach ([
+            '<meta http-equiv="refresh" content="0;url=javascript:alert(1)">',
+            '<meta http-equiv="refresh" content="0;javascript:alert(1)">',
+            '<meta http-equiv="refresh" content="0   vbscript:bad">',
+        ] as $html) {
+            $result = Sane::html( $html, ['meta' => true] );
+            $this->assertDoesNotMatchRegularExpression( '/(javascript|vbscript)/i', $result );
+        }
+    }
+
+
+    // ── DoS: malformed tags that swallow a "<" / unmatched end tags drive the
+    // parser's ~O(n^2) adoption-agency & foster-parenting work ──
+
+    public function testRejectsSwallowedLessThanFlood() : void
+    {
+        foreach (['<p "</a>', '<a=<table></a>', '<p "<p "</a></div>'] as $unit) {
+            $start = microtime( true );
+            $this->assertSame( '', Sane::html( str_repeat( $unit, 30000 ) ), "'$unit' flood must be rejected" );
+            $this->assertLessThan( 1.5, microtime( true ) - $start, "'$unit' flood must be rejected fast" );
+        }
+    }
+
+
+    public function testRejectsUnmatchedEndTagFlood() : void
+    {
+        $start = microtime( true );
+        $this->assertSame( '', Sane::html( str_repeat( '<dd></a></div><td></p></div>', 16000 ) ) );
+        $this->assertLessThan( 1.5, microtime( true ) - $start );
+    }
+
+
+    public function testAllowsLessThanInQuotedAttributeValue() : void
+    {
+        // "<" inside a quoted value is ordinary text, not a swallowed "<" — keep it
+        $result = Sane::html( str_repeat( '<a href="x" title="a<b<c">t</a> ', 5000 ) );
+        $this->assertStringContainsString( 'title="a&lt;b&lt;c"', $result );
+    }
+
+
+    public function testAllowsModeratelyMalformedUserContent() : void
+    {
+        // a sanitizer's job is messy user HTML: a bounded number of unmatched
+        // closes / stray markup must still be accepted, only floods rejected
+        $result = Sane::html( str_repeat( '<p>hi</b> <i>there</p> <span>ok</div> ', 200 ) );
+        $this->assertStringContainsString( 'there', $result );
+    }
 }

@@ -83,6 +83,10 @@ class Sane
     private const MAX_LENGTH = 4194304;   // 4 MiB
     private const MAX_DEPTH = 256;
     private const MAX_ELEMENTS = 50000;
+    private const MAX_STRAY = 16384;      // stray "<" that hit the parser's O(n^2) path
+    private const MAX_ATTR_WORK = 16000000;   // bounds the parser's ~O(attrs^2)-per-element cost
+    private const MAX_SWALLOW = 2048;     // malformed "<" consumed inside tags (drives O(n^2) reconstruction)
+    private const MAX_MISMATCH = 2048;    // unmatched end tags (drive O(n^2) foster-parenting/adoption work)
 
 
     /**
@@ -128,7 +132,7 @@ class Sane
             self::neutralizeCdata( $xpath, $doc );
         }
 
-        self::sanitizeNodes( $xpath, $removeSet );
+        self::sanitizeNodes( $xpath, $doc, $removeSet );
 
         if( isset( $allow['style'] ) || isset( $allow['script'] ) ) {
             self::dropRawTextBreakouts( $xpath );
@@ -220,27 +224,30 @@ class Sane
 
 
     /**
-     * Single pass over every node: remove comments, blocked elements and
-     * script-bearing SVG elements; on each surviving element strip
-     * event-handler/style/dangerous-URI and clobbering id/name attributes and add
-     * rel="noopener noreferrer" to target="_blank" links.
+     * Strips comments (via a linear DOM walk) and then makes a single pass over
+     * every element: removes blocked and script-bearing SVG elements and, on each
+     * survivor, strips event-handler/style/dangerous-URI and clobbering id/name
+     * attributes and adds rel="noopener noreferrer" to links opening a new context.
      *
      * @param array<string, true> $removeSet
      */
-    private static function sanitizeNodes( \DOMXPath $xpath, array $removeSet ) : void
+    private static function sanitizeNodes( \DOMXPath $xpath, \DOMDocument $doc, array $removeSet ) : void
     {
         $animSet = array_flip( self::$unsafeSvgElements );
         $blockedSet = array_flip( self::$blockedNames );
         $uriSet = array_flip( self::$uriAttributes );
-        $nodes = $xpath->query('//comment() | //*');
+
+        // Remove comments with a linear DOM walk: the "//comment()" xpath is
+        // ~O(n^2) in libxml on comment-heavy input (a cheap DoS), unlike "//*".
+        if( $doc->documentElement !== null ) {
+            self::removeComments( $doc->documentElement );
+        }
+
+        $nodes = $xpath->query('//*');
         if( $nodes === false ) {
             return;
         }
         foreach ($nodes as $node) {
-            if( $node instanceof \DOMComment ) {
-                $node->parentNode?->removeChild($node);
-                continue;
-            }
             if( !$node instanceof \DOMElement ) {
                 continue;
             }
@@ -251,7 +258,7 @@ class Sane
             }
 
             $remove = [];
-            $blankTarget = false;
+            $newWindow = false;
             foreach ($node->attributes as $attribute) {
                 $name = $attribute->name;
 
@@ -267,11 +274,16 @@ class Sane
                     continue;
                 }
                 if( $name === 'target' ) {
-                    // Match "_blank" case-insensitively: the browsing-context
-                    // keyword is ASCII case-insensitive, so "_BLANK"/"_Blank" still
-                    // open a new context and must get the rel hardening below.
-                    if( strcasecmp( trim( $attribute->value ), '_blank' ) === 0 ) {
-                        $blankTarget = true;
+                    // A <base target> sets the default browsing context for every
+                    // link in the document, so a tabnabbing target there can't be
+                    // hardened per link — drop it. Any other target that opens a
+                    // separate context (anything but _self/_parent/_top, matched
+                    // case-insensitively, incl. "_blank" and named windows) gets the
+                    // rel="noopener noreferrer" hardening below.
+                    if( $tag === 'base' ) {
+                        $remove[] = $attribute;
+                    } elseif( !in_array( strtolower( trim( $attribute->value ) ), ['', '_self', '_parent', '_top'], true ) ) {
+                        $newWindow = true;
                     }
                     continue;
                 }
@@ -302,7 +314,7 @@ class Sane
                 $node->removeAttributeNode($attribute);
             }
 
-            if( $blankTarget && ($tag === 'a' || $tag === 'area' || $tag === 'form') ) {
+            if( $newWindow && ($tag === 'a' || $tag === 'area' || $tag === 'form') ) {
                 $rel = preg_split('/\s+/', trim($node->getAttribute('rel')), -1, PREG_SPLIT_NO_EMPTY) ?: [];
                 foreach (['noopener', 'noreferrer'] as $token) {
                     if( !in_array($token, $rel, true) ) {
@@ -311,6 +323,25 @@ class Sane
                 }
                 $node->setAttribute('rel', implode(' ', $rel));
             }
+        }
+    }
+
+
+    /**
+     * Recursively removes every comment node under $node. Used instead of an
+     * "//comment()" xpath, which libxml evaluates in ~O(n^2) on comment-heavy input.
+     */
+    private static function removeComments( \DOMNode $node ) : void
+    {
+        $child = $node->firstChild;
+        while( $child !== null ) {
+            $next = $child->nextSibling;
+            if( $child instanceof \DOMComment ) {
+                $node->removeChild( $child );
+            } elseif( $child->hasChildNodes() ) {
+                self::removeComments( $child );
+            }
+            $child = $next;
         }
     }
 
@@ -335,9 +366,11 @@ class Sane
             // those bytes on serialize, re-forming the scheme in the browser.
             $content = (string) preg_replace('/[\x00-\x1f\x7f]/', '', $node->getAttribute('content'));
             // The redirect URL follows the time and a separator (";", "," or
-            // whitespace), with an optional "url=" prefix — handle every form.
+            // whitespace), with an optional "url=" prefix — handle every form. The
+            // whitespace groups are possessive (\s*+) so that all-whitespace content
+            // can't trigger quadratic backtracking before the required URL token.
             if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
-                && preg_match('/^\s*[\d.]*\s*[;,]?\s*(?:url\s*=\s*)?["\']?\s*([^"\'\s>]+)/i', $content, $m)
+                && preg_match('/^\s*+[\d.]*+\s*+[;,]?\s*+(?:url\s*+=\s*+)?["\']?\s*+([^"\'\s>]+)/i', $content, $m)
                 && self::isBlockedUri($m[1])
             ) {
                 $node->removeAttribute('content');
@@ -638,9 +671,13 @@ class Sane
 
     /**
      * Cheap linear pre-scan reporting whether the markup exceeds the nesting
-     * depth (self::MAX_DEPTH) or element-count (self::MAX_ELEMENTS) limits, used
-     * to reject pathological input before the parser and the per-element
-     * pipeline run on it. It mirrors the parser closely enough not to be gamed
+     * depth (self::MAX_DEPTH), element-count (self::MAX_ELEMENTS), stray-"<"
+     * (self::MAX_STRAY), attribute-cost (self::MAX_ATTR_WORK), swallowed-"<"
+     * (self::MAX_SWALLOW) or unmatched-end-tag (self::MAX_MISMATCH) limits, used to
+     * reject pathological input before the
+     * parser and the per-element pipeline run on it — each cap fences off an input
+     * class that drives the parser or pipeline into superlinear time. It mirrors
+     * the parser closely enough not to be gamed
      * downward on depth: a close tag only pops a matching open (so bogus "</z>"
      * can't keep the depth low), a self-closing slash counts as nesting in HTML
      * ("<div/>" nests) but not in SVG/MathML, and the common implied end tags
@@ -678,6 +715,10 @@ class Sane
         $foreign = [];      // parallel: whether each open element holds SVG/MathML content
         $inForeign = false;
         $total = 0;         // total start tags seen (≈ DOM nodes the pipeline visits)
+        $stray = 0;         // stray "<" feeding the parser's O(n^2) character path
+        $attrWork = 0;      // running sum of attrs^2 — the parser's per-element attribute cost
+        $swallowed = 0;     // "<" consumed inside tags — feeds the parser's O(n^2) reconstruction
+        $mismatch = 0;      // unmatched end tags — feed the parser's O(n^2) foster-parenting work
         $len = strlen( $input );
         $offset = 0;
 
@@ -689,18 +730,45 @@ class Sane
             if( $ch === '/' )   // end tag — pop down to the matching open, if any
             {
                 $name = self::tagName( $input, $offset + 1, $len );
+                $selfClosing = false;
+                $attrs = 0;
+                $sw = 0;
+                $end = self::tagEnd( $input, $offset + 1, $len, $selfClosing, $attrs, $sw );
+                if( ($attrWork += $attrs * $attrs) > self::MAX_ATTR_WORK
+                    || ($swallowed += $sw) > self::MAX_SWALLOW ) {
+                    return true;
+                }
+                $matched = false;
                 for( $i = count( $stack ) - 1; $i >= 0; $i-- ) {
                     if( $stack[$i] === $name ) {
                         array_splice( $stack, $i );
                         array_splice( $foreign, $i );
+                        $matched = true;
                         break;
                     }
                 }
+                // An end tag with no matching open is malformed; the parser handles
+                // each via foster-parenting/adoption-agency work that grows ~O(n^2)
+                // (e.g. "<dd></a></div><td></p></div>") yet is invisible to the
+                // depth/element caps. Legit markup has ~none, so bound the count.
+                if( !$matched && ++$mismatch > self::MAX_MISMATCH ) {
+                    return true;
+                }
                 $inForeign = $foreign === [] ? false : $foreign[count( $foreign ) - 1];
+                // Skip the tag body so its quoted "<"/">" aren't rescanned; if the
+                // tag was cut short by a restarting "<", re-read that "<" next.
+                $offset = ( $end < $len && $input[$end] === '>' ) ? $end + 1 : $end;
                 continue;
             }
 
             if( !ctype_alpha( $ch ) ) {
+                // "<!" (comments/declarations) and "<?" (PIs) tokenize cheaply, but
+                // any other non-tag "<" (e.g. "<<", "< ", "<1") falls to Masterminds'
+                // ~O(n^2) character-token path that the depth/element caps don't see;
+                // bound how many we accept so a stray-"<" flood can't hang the parser.
+                if( $ch !== '!' && $ch !== '?' && ++$stray > self::MAX_STRAY ) {
+                    return true;
+                }
                 continue;       // comment, declaration, processing instruction or stray "<"
             }
 
@@ -709,8 +777,25 @@ class Sane
             }
 
             $name = self::tagName( $input, $offset, $len );
-            $gt = strpos( $input, '>', $offset );
-            $selfClosing = $gt !== false && $input[$gt - 1] === '/';
+            // Find the real end of the tag, honoring quoted/unquoted attribute
+            // values, so a "/>" hidden inside a value (e.g. <g x="a/>b">) can't pose
+            // as a self-closing tag and let deeply nested foreign content sneak past
+            // the depth guard. Advancing past the end also skips attribute-soup "<".
+            $selfClosing = false;
+            $attrs = 0;
+            $sw = 0;
+            $end = self::tagEnd( $input, $offset, $len, $selfClosing, $attrs, $sw );
+            $offset = ( $end < $len && $input[$end] === '>' ) ? $end + 1 : $end;
+
+            // Building an element is ~O(attrs^2) in the parser (duplicate-name
+            // checks), and a "<" swallowed by a malformed tag drives ~O(n^2)
+            // adoption-agency/reconstruction — both invisible to the element/depth
+            // caps. Bound the summed attribute cost and the swallowed-"<" count so
+            // neither a huge attribute list nor a flood of malformed tags hangs it.
+            if( ($attrWork += $attrs * $attrs) > self::MAX_ATTR_WORK
+                || ($swallowed += $sw) > self::MAX_SWALLOW ) {
+                return true;
+            }
 
             // Void elements never nest; a self-closing slash only ends the tag
             // in SVG/MathML content, where "<circle/>" is a leaf.
@@ -751,6 +836,87 @@ class Sane
             $end++;
         }
         return strtolower( substr( $input, $start, $end - $start ) );
+    }
+
+
+    /**
+     * Scans a tag starting at $start (its first name character) and returns the
+     * index at which it ends, mirroring how the parser tokenizes a tag: a ">" or
+     * "/>" inside a quoted ("…"/'…') or unquoted attribute value does NOT end the
+     * tag. A "<" followed by a letter starts a new tag (the parser abandons the
+     * current one — so "<br<br" is two tags); a "<" before anything else (e.g.
+     * "</a>") is consumed as part of the current tag, as the parser does. A quoted
+     * value is only entered
+     * after "="; a bare "'"/'"' in attribute-name position is an ordinary name
+     * character (matching the tokenizer), so it can't swallow the rest of the input.
+     * $selfClosing is set only when the tag ends with a real tag-level "/>",
+     * $attrs to the number of attributes (each preceded by a whitespace run, incl.
+     * the run after an unquoted value), and $swallowed to the number of stray "<"
+     * the tag consumes (a malformed-markup signal — see exceedsLimits). Returns the
+     * index of the ending ">" or restarting "<" (the caller re-reads a "<"), or
+     * $len at EOF.
+     */
+    private static function tagEnd( string $input, int $start, int $len, bool &$selfClosing, int &$attrs, int &$swallowed ) : int
+    {
+        $selfClosing = false;
+        $attrs = 0;
+        $swallowed = 0;
+        $state = 0;     // 0=tag, 1=double-quoted value, 2=single-quoted value, 3=unquoted value, 4=after "="
+        $prevSlash = false;
+        $inSpace = false;
+
+        for( $i = $start; $i < $len; $i++ ) {
+            $c = $input[$i];
+
+            if( $state === 1 ) { if( $c === '"' ) { $state = 0; } $inSpace = false; continue; }
+            if( $state === 2 ) { if( $c === "'" ) { $state = 0; } $inSpace = false; continue; }
+            if( $state === 3 ) {                        // unquoted value: ">" ends it, "<"/"/" are literal
+                if( $c === '>' ) { return $i; }
+                if( $c === '<' ) { $swallowed++; $inSpace = false; continue; }
+                if( ctype_space( $c ) ) {               // value ended; this run precedes the next attribute
+                    $state = 0;
+                    $attrs++;
+                    $inSpace = true;
+                } else {
+                    $inSpace = false;
+                }
+                continue;
+            }
+            if( $state === 4 ) {                        // just saw "=", a value is about to start
+                if( ctype_space( $c ) ) { continue; }
+                if( $c === '"' ) { $state = 1; }
+                elseif( $c === "'" ) { $state = 2; }
+                elseif( $c === '>' ) { return $i; }
+                else { if( $c === '<' ) { $swallowed++; } $state = 3; }
+                $inSpace = false;
+                continue;
+            }
+
+            // state 0 — within the tag, not inside an attribute value
+            if( $c === '>' ) { $selfClosing = $prevSlash; return $i; }
+            // "<" + a letter starts a new tag (the parser abandons this one — so
+            // "<br<br" is two tags); "<" before anything else (e.g. "</a>", "< ")
+            // is consumed as part of this tag, exactly as the parser does — so a
+            // "<a \"</a>" can't fool the main loop into popping a tag the parser
+            // actually keeps open (which would hide deep nesting from the cap). A
+            // consumed "<" is counted: it only arises from malformed markup and is
+            // what feeds the parser's O(n^2) reconstruction (see exceedsLimits).
+            if( $c === '<' ) {
+                if( $i + 1 < $len && ctype_alpha( $input[$i + 1] ) ) { return $i; }
+                $swallowed++;
+            }
+            if( ctype_space( $c ) ) {                   // each whitespace run precedes a new attribute
+                if( !$inSpace ) { $attrs++; }
+                $inSpace = true;
+                $prevSlash = false;
+                continue;
+            }
+            $inSpace = false;
+            if( $c === '=' ) { $state = 4; }            // only "=" starts a value; "'"/'"' are name chars
+            $prevSlash = ( $c === '/' );
+        }
+
+        return $len;
     }
 
 
