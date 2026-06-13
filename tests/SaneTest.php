@@ -392,6 +392,24 @@ class SaneTest extends TestCase
     }
 
 
+    public function testAllowTemplateTrueSanitizesContent() : void
+    {
+        // an allowed <template> must never ship a live handler / script / dangerous
+        // URL in its content, whichever backend is active (the legacy path strips
+        // them in place; the native path drops the unreachable template content)
+        foreach ([
+            '<template><img src=x onerror=alert(1)></template>',
+            '<template><script>alert(1)</script></template>',
+            '<template><a href="javascript:alert(1)">x</a></template>',
+            '<template><svg><set onbegin=alert(1)></set></svg></template>',
+        ] as $html) {
+            $result = Sane::html( $html, ['template' => true, 'svg' => true] );
+            $this->assertStringContainsString( '<template>', $result );
+            $this->assertDoesNotMatchRegularExpression( '/(onerror|onbegin|<script|javascript:)/i', $result );
+        }
+    }
+
+
     public function testAllowNoscriptTrue() : void
     {
         $html = '<p>ok</p><noscript>Enable JS</noscript>';
@@ -1283,17 +1301,22 @@ class SaneTest extends TestCase
 
     public function testNeutralizesCdataBreakout() : void
     {
-        // browsers parse "<![CDATA[" as a bogus comment ending at the first ">",
-        // so the trailing <img> must not survive as live markup
+        // A "<![CDATA[" is a bogus comment in HTML; the markup it would free must
+        // not survive carrying a live event handler / script. (A spec-compliant
+        // parser keeps the trailing <img> as a real element — sanitized to drop
+        // the handler — while a non-compliant one escapes it to text; both safe.)
         $result = Sane::html( '<![CDATA[><img src=x onerror=alert(1)>]]>' );
-        $this->assertStringNotContainsString( '<img', $result );
+        // no LIVE <img> carrying the handler (escaped-to-text "&lt;img…onerror…" is inert)
+        $this->assertDoesNotMatchRegularExpression( '/<img[^>]*onerror/i', $result );
         $this->assertStringNotContainsString( '<svg', Sane::html( '<![CDATA[]]><svg onload=alert(1)>' ) );
     }
 
 
-    public function testCdataPreservesPlainText() : void
+    public function testCdataPlainTextDoesNotLeakMarkup() : void
     {
-        $this->assertSame( 'hello world', self::sanitize( '<![CDATA[hello world]]>' ) );
+        // CDATA in HTML is a bogus comment — its text is dropped or kept as text,
+        // but it must never leak as live markup either way.
+        $this->assertStringNotContainsString( '<', self::sanitize( '<![CDATA[hello world]]>' ) );
     }
 
 
@@ -1355,9 +1378,11 @@ class SaneTest extends TestCase
 
     public function testAllowStyleNeutralizesEndTagSlashBreakout() : void
     {
+        // The freed markup must not carry a live handler. (A spec-compliant parser
+        // closes <style> at "</style/>" and keeps the <img> as a sanitized element;
+        // a non-compliant one keeps it as inert raw text — both drop the handler.)
         $result = Sane::html( '<style></style/><img src=x onerror=alert(1)>', ['style' => true] );
         $this->assertStringNotContainsString( 'onerror', $result );
-        $this->assertStringNotContainsString( '<img', $result );
     }
 
 
@@ -1663,9 +1688,13 @@ class SaneTest extends TestCase
 
     public function testAllowsLessThanInQuotedAttributeValue() : void
     {
-        // "<" inside a quoted value is ordinary text, not a swallowed "<" — keep it
+        // "<" inside a quoted value is ordinary text, not a swallowed "<", so the
+        // flood is accepted (not rejected) and the links survive. (Serialization of
+        // "<" in a value differs by backend — escaped vs literal — but both keep it
+        // safely inside the attribute.)
         $result = Sane::html( str_repeat( '<a href="x" title="a<b<c">t</a> ', 5000 ) );
-        $this->assertStringContainsString( 'title="a&lt;b&lt;c"', $result );
+        $this->assertStringContainsString( 'href="x"', $result );
+        $this->assertMatchesRegularExpression( '/title="a(&lt;|<)b(&lt;|<)c"/', $result );
     }
 
 

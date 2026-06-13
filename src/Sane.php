@@ -106,11 +106,34 @@ class Sane
      */
     public static function html( string $input, array $allow = [] ) : string
     {
-        // Reject hostile input before the parser and pipeline run on it.
+        // Reject hostile input before the parser and pipeline run on it. The cap
+        // also keeps the (Masterminds-specific) O(n^2) parser paths bounded; on the
+        // native path below it bounds the per-element pipeline and attribute cost.
         if( strlen( $input ) > self::MAX_LENGTH || self::exceedsLimits( $input ) ) {
             return '';
         }
 
+        // PHP 8.4+: parse with the native, spec-compliant, O(n) HTML5 parser
+        // (lexbor) and serialize with it too, so even crafted misnested tag soup
+        // can't drive the parser into superlinear time. Falls back to the
+        // Masterminds path on PHP 8.0-8.3.
+        if( class_exists( '\Dom\HTMLDocument' ) ) {
+            return self::htmlNative( $input, $allow );
+        }
+
+        return self::htmlLegacy( $input, $allow );
+    }
+
+
+    /**
+     * Masterminds (pure-PHP HTML5) sanitization path for PHP 8.0-8.3, where the
+     * native parser is unavailable. Identical behaviour to the native path, modulo
+     * cosmetic serialization differences.
+     *
+     * @param array<string, bool|list<string>> $allow
+     */
+    private static function htmlLegacy( string $input, array $allow ) : string
+    {
         // Parse with the HTML5 algorithm (matching browsers) so the
         // parse → sanitize → serialize → browser-reparse cycle stays
         // consistent and can't be exploited via parser-differential mutation
@@ -146,6 +169,363 @@ class Sane
         self::unwrapStructural( $xpath );
 
         return self::serializeBody( $doc );
+    }
+
+
+    /**
+     * Native (lexbor) sanitization path for PHP 8.4+. Mirrors htmlLegacy() against
+     * the spec-compliant \Dom API: elements are matched by lower-case local name
+     * (HTML names are upper-cased and foreign content carries real namespaces here)
+     * and serialization round-trips faithfully, so the parser-differential passes
+     * still run but find nothing to fix. The one behavioural difference is an
+     * allowed <template>: lexbor sequesters its children in an unreachable content
+     * fragment, so this path drops that content (nativeStripTemplateContent) rather
+     * than sanitizing it in place — safe, but emptier than the legacy output. These
+     * methods only execute when \Dom\HTMLDocument exists, so their \Dom\* type
+     * hints are never resolved on PHP 8.0-8.3.
+     *
+     * @param array<string, bool|list<string>> $allow
+     */
+    private static function htmlNative( string $input, array $allow ) : string
+    {
+        $doc = \Dom\HTMLDocument::createFromString(
+            '<!DOCTYPE html><html><body>' . $input . '</body></html>', LIBXML_NOERROR
+        );
+        $xpath = new \Dom\XPath( $doc );
+
+        $removeSet = self::nativeApplyAllowList( $xpath, $allow );
+
+        if( isset( $allow['noscript'] ) ) {
+            self::nativeCollapseNoscript( $xpath, $doc );
+        }
+        if( stripos( $input, '<![cdata[' ) !== false ) {
+            self::nativeNeutralizeCdata( $xpath, $doc );
+        }
+
+        self::nativeSanitizeNodes( $xpath, $doc, $removeSet );
+
+        if( isset( $allow['template'] ) ) {
+            self::nativeStripTemplateContent( $xpath );
+        }
+        if( isset( $allow['style'] ) || isset( $allow['script'] ) ) {
+            self::nativeDropRawTextBreakouts( $xpath );
+        }
+        if( isset( $allow['meta'] ) ) {
+            self::nativeCheckMetaRefresh( $xpath );
+        }
+        if( isset( $allow['script'] ) ) {
+            self::nativeDropInlineScripts( $xpath );
+        }
+        self::nativeUnwrapStructural( $xpath );
+
+        return self::nativeSerializeBody( $doc );
+    }
+
+
+    /**
+     * @param array<string, bool|list<string>> $allow
+     * @return array<string, true>
+     */
+    private static function nativeApplyAllowList( \Dom\XPath $xpath, array $allow ) : array
+    {
+        $removeSet = [];
+        foreach (self::$removeElements as $tag) {
+            if( isset( $allow[$tag] ) ) {
+                if( $allow[$tag] === true ) {
+                    self::nativeHardenAllowed( $xpath, $tag );
+                    if( $tag === 'base' ) {
+                        self::nativeRestrictBaseHref( $xpath );
+                    }
+                    continue;
+                }
+                self::nativeFilterByUri( $xpath, $tag, array_values( array_filter( (array) $allow[$tag], 'is_string' ) ) );
+                continue;
+            }
+            $removeSet[$tag] = true;
+        }
+        return $removeSet;
+    }
+
+
+    private static function nativeCollapseNoscript( \Dom\XPath $xpath, \Dom\HTMLDocument $doc ) : void
+    {
+        foreach ($xpath->document->querySelectorAll('noscript') as $node) {
+            if( !$node->hasChildNodes() ) {
+                continue;
+            }
+            $text = (string) $node->textContent;
+            while( $node->firstChild !== null ) {
+                $node->removeChild( $node->firstChild );
+            }
+            if( $text !== '' ) {
+                $node->appendChild( $doc->createTextNode( $text ) );
+            }
+        }
+    }
+
+
+    /**
+     * Defensive only: lexbor parses "<![CDATA[" in HTML as a bogus comment (removed
+     * by nativeRemoveComments) and CDATA in foreign content as escaped text, so it
+     * never emits a \Dom\CdataSection here — unlike the libxml DOM the legacy path
+     * builds. Kept as a guard in case a future build does, mirroring the legacy pass.
+     */
+    private static function nativeNeutralizeCdata( \Dom\XPath $xpath, \Dom\HTMLDocument $doc ) : void
+    {
+        foreach ($xpath->query('//text()') as $node) {
+            if( $node instanceof \Dom\CdataSection ) {
+                $node->parentNode?->replaceChild( $doc->createTextNode( $node->data ), $node );
+            }
+        }
+    }
+
+
+    /**
+     * @param array<string, true> $removeSet
+     */
+    private static function nativeSanitizeNodes( \Dom\XPath $xpath, \Dom\HTMLDocument $doc, array $removeSet ) : void
+    {
+        $animSet = array_flip( self::$unsafeSvgElements );
+        $blockedSet = array_flip( self::$blockedNames );
+        $uriSet = array_flip( self::$uriAttributes );
+
+        if( $doc->documentElement !== null ) {
+            self::nativeRemoveComments( $doc->documentElement );
+        }
+
+        foreach ($xpath->query('//*') as $node) {
+            if( !$node instanceof \Dom\Element ) {
+                continue;
+            }
+            $tag = strtolower( (string) $node->localName );
+            if( isset( $removeSet[$tag] ) || isset( $animSet[$tag] ) ) {
+                $node->parentNode?->removeChild($node);
+                continue;
+            }
+
+            $remove = [];
+            $newWindow = false;
+            foreach ($node->attributes as $attribute) {
+                $name = $attribute->name;
+
+                if( stripos($name, 'on') === 0 || $name === 'style' ) {
+                    $remove[] = $attribute;
+                    continue;
+                }
+                if( $name === 'id' || $name === 'name' ) {
+                    if( isset( $blockedSet[$attribute->value] ) ) {
+                        $remove[] = $attribute;
+                    }
+                    continue;
+                }
+                if( $name === 'target' ) {
+                    if( $tag === 'base' ) {
+                        $remove[] = $attribute;
+                    } elseif( !in_array( strtolower( trim( $attribute->value ) ), ['', '_self', '_parent', '_top'], true ) ) {
+                        $newWindow = true;
+                    }
+                    continue;
+                }
+
+                // Match the full and local name so namespaced URI attributes such
+                // as xlink:href (local name "href") are checked too. Unlike legacy
+                // \DOMAttr, \Dom\Attr::$localName is never null, so no null guard.
+                $local = $attribute->localName;
+                if( !isset( $uriSet[$name] ) && !isset( $uriSet[$local] ) ) {
+                    continue;
+                }
+                if (self::uriValueBlocked($local, trim($attribute->value))) {
+                    $remove[] = $attribute;
+                }
+            }
+            foreach ($remove as $attribute) {
+                $node->removeAttributeNode($attribute);
+            }
+
+            if( $newWindow && ($tag === 'a' || $tag === 'area' || $tag === 'form') ) {
+                $node->setAttribute('rel', self::mergeRel($node->getAttribute('rel') ?? ''));
+            }
+        }
+    }
+
+
+    private static function nativeRemoveComments( \Dom\Node $node ) : void
+    {
+        $child = $node->firstChild;
+        while( $child !== null ) {
+            $next = $child->nextSibling;
+            if( $child instanceof \Dom\Comment ) {
+                $node->removeChild( $child );
+            } elseif( $child->hasChildNodes() ) {
+                self::nativeRemoveComments( $child );
+            }
+            $child = $next;
+        }
+    }
+
+
+    /**
+     * Drops the content of every kept <template>. lexbor parses template children
+     * into a content DocumentFragment that the \Dom API cannot reach (no "content"
+     * property; "//*"/querySelectorAll don't descend into it) yet saveHtml() still
+     * serializes — so, unlike the legacy path which sanitizes that content in place,
+     * the only safe option here is to discard it, keeping the (already-sanitized)
+     * template element. A shallow clone copies the element and its attributes but
+     * not the unreachable content. Only reachable when template is allowed.
+     */
+    private static function nativeStripTemplateContent( \Dom\XPath $xpath ) : void
+    {
+        foreach( $xpath->document->querySelectorAll('template') as $node ) {
+            $node->parentNode?->replaceChild( $node->cloneNode(false), $node );
+        }
+    }
+
+
+    private static function nativeCheckMetaRefresh( \Dom\XPath $xpath ) : void
+    {
+        foreach ($xpath->document->querySelectorAll('meta[content]') as $node) {
+            if( self::metaRefreshBlocked($node->getAttribute('content') ?? '', $node->getAttribute('http-equiv') ?? '') ) {
+                $node->removeAttribute('content');
+            }
+        }
+    }
+
+
+    private static function nativeDropRawTextBreakouts( \Dom\XPath $xpath ) : void
+    {
+        foreach( $xpath->document->querySelectorAll('style, script') as $node ) {
+            $tag = strtolower( (string) $node->localName );
+            if( preg_match( '#</' . $tag . '[\s/>]#i', (string) $node->textContent ) ) {
+                $node->parentNode?->removeChild( $node );
+            }
+        }
+    }
+
+
+    private static function nativeDropInlineScripts( \Dom\XPath $xpath ) : void
+    {
+        foreach ($xpath->document->querySelectorAll('script') as $node) {
+            if( trim($node->getAttribute('src') ?? '') === '' ) {
+                $node->parentNode?->removeChild($node);
+            }
+        }
+    }
+
+
+    private static function nativeUnwrapStructural( \Dom\XPath $xpath ) : void
+    {
+        $nodes = $xpath->query('//*[local-name()="body"]//*[local-name()="html" or local-name()="head"'
+            . ' or local-name()="body" or local-name()="frameset" or (local-name()="title"'
+            . ' and not(ancestor::*[local-name()="svg"]) and not(ancestor::*[local-name()="math"]))]');
+        foreach ($nodes as $node) {
+            if( !$node instanceof \Dom\Element || $node->parentNode === null ) {
+                continue;
+            }
+            while( $node->firstChild !== null ) {
+                $node->parentNode->insertBefore( $node->firstChild, $node );
+            }
+            $node->parentNode->removeChild( $node );
+        }
+    }
+
+
+    private static function nativeSerializeBody( \Dom\HTMLDocument $doc ) : string
+    {
+        $body = $doc->getElementsByTagName('body')->item(0);
+        if( !$body instanceof \Dom\Element ) {
+            return '';
+        }
+        while( $body->attributes->length > 0 ) {
+            $attr = $body->attributes->item(0);
+            if( !$attr instanceof \Dom\Attr ) {
+                break;
+            }
+            $body->removeAttributeNode( $attr );
+        }
+        $html = (string) preg_replace('#^\s*<body[^>]*>#i', '', $doc->saveHtml( $body ));
+        return (string) preg_replace('#</body>\s*$#i', '', $html);
+    }
+
+
+    /**
+     * @param list<string> $uris
+     */
+    private static function nativeFilterByUri( \Dom\XPath $xpath, string $tag, array $uris ) : void
+    {
+        $uriAttr = self::$tagUriAttr[$tag] ?? null;
+        $nodes = $xpath->document->querySelectorAll($tag);
+
+        if( $uriAttr === null )
+        {
+            foreach( $nodes as $node ) {
+                $node->parentNode?->removeChild( $node );
+            }
+            return;
+        }
+
+        foreach( $nodes as $node )
+        {
+            $val = trim( $node->getAttribute( $uriAttr ) ?? '' );
+            if( !$val || !self::isAllowedUri( $val, $uris ) || self::isBlockedUri( $val ) )
+            {
+                $node->parentNode?->removeChild( $node );
+                continue;
+            }
+            self::nativeHardenAttributes( $node, $tag );
+        }
+    }
+
+
+    private static function nativeRestrictBaseHref( \Dom\XPath $xpath ) : void
+    {
+        foreach( $xpath->document->querySelectorAll('base[href]') as $node ) {
+            if( self::baseHrefCrossOrigin( $node->getAttribute('href') ?? '' ) ) {
+                $node->removeAttribute('href');
+            }
+        }
+    }
+
+
+    private static function nativeHardenAllowed( \Dom\XPath $xpath, string $tag ) : void
+    {
+        if( !isset( self::$safeAttrs[$tag] ) ) {
+            return;
+        }
+        foreach( $xpath->document->querySelectorAll($tag) as $node ) {
+            self::nativeHardenAttributes( $node, $tag );
+        }
+    }
+
+
+    private static function nativeHardenAttributes( \Dom\Element $node, string $tag ) : void
+    {
+        if( !isset( self::$safeAttrs[$tag] ) ) {
+            return;
+        }
+        $safe = self::$safeAttrs[$tag];
+        $attrsToRemove = [];
+
+        foreach( $node->attributes as $attr ) {
+            if( !in_array( $attr->name, $safe, true ) ) {
+                $attrsToRemove[] = $attr;
+            }
+        }
+        foreach( $attrsToRemove as $attr ) {
+            $node->removeAttributeNode( $attr );
+        }
+
+        if( $tag === 'iframe' && $node->hasAttribute( 'allow' ) ) {
+            $allow = self::filterAllowFeatures( $node->getAttribute( 'allow' ) ?? '' );
+            if( $allow !== '' ) {
+                $node->setAttribute( 'allow', $allow );
+            } else {
+                $node->removeAttribute( 'allow' );
+            }
+        }
+
+        if( in_array( $tag, ['iframe', 'frame'], true ) ) {
+            $node->setAttribute( 'sandbox', 'allow-scripts allow-popups' );
+        }
     }
 
 
@@ -296,17 +676,7 @@ class Sane
                 }
                 // The attribute value is already entity-decoded to what the
                 // browser sees, so it is checked as-is.
-                $value = trim($attribute->value);
-
-                if ($local === 'srcset') {
-                    foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
-                        $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
-                        if (self::isBlockedUri($url)) {
-                            $remove[] = $attribute;
-                            break;
-                        }
-                    }
-                } elseif (self::isBlockedUri($value)) {
+                if (self::uriValueBlocked($local, trim($attribute->value))) {
                     $remove[] = $attribute;
                 }
             }
@@ -315,13 +685,7 @@ class Sane
             }
 
             if( $newWindow && ($tag === 'a' || $tag === 'area' || $tag === 'form') ) {
-                $rel = preg_split('/\s+/', trim($node->getAttribute('rel')), -1, PREG_SPLIT_NO_EMPTY) ?: [];
-                foreach (['noopener', 'noreferrer'] as $token) {
-                    if( !in_array($token, $rel, true) ) {
-                        $rel[] = $token;
-                    }
-                }
-                $node->setAttribute('rel', implode(' ', $rel));
+                $node->setAttribute('rel', self::mergeRel($node->getAttribute('rel')));
             }
         }
     }
@@ -357,21 +721,8 @@ class Sane
             return;
         }
         foreach ($nodes as $node) {
-            if( !$node instanceof \DOMElement ) {
-                continue;
-            }
-            // Strip every C0 control char (and DEL) first: an embedded control
-            // would otherwise terminate the URL extraction below early (\s in the
-            // pattern matches VT/FF), hiding the real scheme — and libxml drops
-            // those bytes on serialize, re-forming the scheme in the browser.
-            $content = (string) preg_replace('/[\x00-\x1f\x7f]/', '', $node->getAttribute('content'));
-            // The redirect URL follows the time and a separator (";", "," or
-            // whitespace), with an optional "url=" prefix — handle every form. The
-            // whitespace groups are possessive (\s*+) so that all-whitespace content
-            // can't trigger quadratic backtracking before the required URL token.
-            if( strcasecmp($node->getAttribute('http-equiv'), 'refresh') === 0
-                && preg_match('/^\s*+[\d.]*+\s*+[;,]?\s*+(?:url\s*+=\s*+)?["\']?\s*+([^"\'\s>]+)/i', $content, $m)
-                && self::isBlockedUri($m[1])
+            if( $node instanceof \DOMElement
+                && self::metaRefreshBlocked($node->getAttribute('content'), $node->getAttribute('http-equiv'))
             ) {
                 $node->removeAttribute('content');
             }
@@ -537,15 +888,7 @@ class Sane
         }
 
         foreach( $nodes as $node ) {
-            if( !$node instanceof \DOMElement ) {
-                continue;
-            }
-            // Normalize like a browser (strip control chars, treat backslashes
-            // as slashes) so "\\evil", "/\evil" and "ht&#9;tps://evil" can't slip
-            // past the cross-origin test below.
-            $href = str_replace('\\', '/', self::stripUrlControlChars( $node->getAttribute('href') ));
-
-            if( str_starts_with($href, '//') || preg_match('#^[a-zA-Z][a-zA-Z0-9+.-]*:#', $href) ) {
+            if( $node instanceof \DOMElement && self::baseHrefCrossOrigin( $node->getAttribute('href') ) ) {
                 $node->removeAttribute('href');
             }
         }
@@ -604,16 +947,9 @@ class Sane
         // Restrict the iframe Permissions-Policy "allow" attribute to safe
         // features so an allowed embed can't request e.g. camera or microphone.
         if( $tag === 'iframe' && $node->hasAttribute( 'allow' ) ) {
-            $kept = [];
-            foreach( explode( ';', $node->getAttribute( 'allow' ) ) as $directive ) {
-                $directive = trim( $directive );
-                $feature = strtolower( (preg_split( '/\s+/', $directive ) ?: [''])[0] );
-                if( $directive !== '' && in_array( $feature, self::$safeAllowFeatures, true ) ) {
-                    $kept[] = $directive;
-                }
-            }
-            if( $kept ) {
-                $node->setAttribute( 'allow', implode( '; ', $kept ) );
+            $allow = self::filterAllowFeatures( $node->getAttribute( 'allow' ) );
+            if( $allow !== '' ) {
+                $node->setAttribute( 'allow', $allow );
             } else {
                 $node->removeAttribute( 'allow' );
             }
@@ -960,5 +1296,90 @@ class Sane
         }
 
         return false;
+    }
+
+
+    /**
+     * Whether a URI attribute value uses a blocked scheme; a "srcset" value is
+     * split into its candidate URLs first. Backend-independent so both the legacy
+     * and native attribute passes share one rule.
+     */
+    private static function uriValueBlocked( ?string $local, string $value ) : bool
+    {
+        if ($local === 'srcset') {
+            foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
+                $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
+                if (self::isBlockedUri($url)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return self::isBlockedUri($value);
+    }
+
+
+    /**
+     * Adds rel="noopener noreferrer" to an existing rel value, preserving its
+     * other tokens. Hardens links/forms that open a separate browsing context.
+     */
+    private static function mergeRel( string $rel ) : string
+    {
+        $tokens = preg_split('/\s+/', trim($rel), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        foreach (['noopener', 'noreferrer'] as $token) {
+            if( !in_array($token, $tokens, true) ) {
+                $tokens[] = $token;
+            }
+        }
+        return implode(' ', $tokens);
+    }
+
+
+    /**
+     * Restricts an iframe "allow" Permissions-Policy value to the safe feature
+     * list, returning the rebuilt value ("" when nothing survives).
+     */
+    private static function filterAllowFeatures( string $allow ) : string
+    {
+        $kept = [];
+        foreach( explode(';', $allow) as $directive ) {
+            $directive = trim($directive);
+            $feature = strtolower( (preg_split('/\s+/', $directive) ?: [''])[0] );
+            if( $directive !== '' && in_array($feature, self::$safeAllowFeatures, true) ) {
+                $kept[] = $directive;
+            }
+        }
+        return implode('; ', $kept);
+    }
+
+
+    /**
+     * Whether a <base> href points off the current origin (absolute or
+     * protocol-relative), normalized like a browser (strip control chars, treat
+     * backslashes as slashes) so "\\evil", "/\evil" and "ht&#9;tps://evil" can't
+     * slip past the cross-origin test.
+     */
+    private static function baseHrefCrossOrigin( string $href ) : bool
+    {
+        $href = str_replace('\\', '/', self::stripUrlControlChars($href));
+        return str_starts_with($href, '//') || (bool) preg_match('#^[a-zA-Z][a-zA-Z0-9+.-]*:#', $href);
+    }
+
+
+    /**
+     * Whether a <meta http-equiv="refresh"> content value redirects via a blocked
+     * scheme. Control chars are stripped first (an embedded one would terminate
+     * the URL extraction early and is dropped on serialize anyway) and the
+     * whitespace groups are possessive so all-whitespace content can't backtrack
+     * quadratically before the required URL token.
+     */
+    private static function metaRefreshBlocked( string $content, string $httpEquiv ) : bool
+    {
+        if( strcasecmp($httpEquiv, 'refresh') !== 0 ) {
+            return false;
+        }
+        $content = (string) preg_replace('/[\x00-\x1f\x7f]/', '', $content);
+        return preg_match('/^\s*+[\d.]*+\s*+[;,]?\s*+(?:url\s*+=\s*+)?["\']?\s*+([^"\'\s>]+)/i', $content, $m) === 1
+            && self::isBlockedUri($m[1]);
     }
 }
