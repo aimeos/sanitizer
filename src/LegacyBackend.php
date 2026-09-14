@@ -69,8 +69,12 @@ class LegacyBackend
         }
 
         $events = new class(self::MAX_ERRORS - $errors) extends \Masterminds\HTML5\Parser\DOMTreeBuilder {
-            public function __construct( private int $remainingErrors )
+            /** @var int */
+            private $remainingErrors;
+
+            public function __construct( int $remainingErrors )
             {
+                $this->remainingErrors = $remainingErrors;
                 parent::__construct(false, ['disable_html_ns' => true]);
             }
 
@@ -142,7 +146,7 @@ class LegacyBackend
         };
         try {
             $parser->parse();
-        } catch( \OverflowException ) {
+        } catch( \OverflowException $e ) {
             return null;
         }
         return $events->document();
@@ -189,7 +193,9 @@ class LegacyBackend
         }
         foreach ($nodes as $node) {
             if( $node instanceof \DOMCdataSection ) {
-                $node->parentNode?->replaceChild( $doc->createTextNode( $node->data ), $node );
+                if( $node->parentNode !== null ) {
+                    $node->parentNode->replaceChild( $doc->createTextNode( $node->data ), $node );
+                }
             }
         }
     }

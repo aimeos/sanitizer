@@ -1,6 +1,6 @@
 # Aimeos Sanitizer
 
-HTML fragment sanitization for PHP 8.0+. PHP 8.4+ uses the native HTML5 parser;
+HTML fragment sanitization for PHP 7.1+. PHP 8.4+ uses the native HTML5 parser;
 older PHP versions use Masterminds HTML5. Both backends share the security policy.
 
 ## Installation
@@ -158,19 +158,21 @@ Empty output may also mean all content was removed.
 ## Validation
 
 ```bash
-XDEBUG_MODE=off php vendor/bin/phpunit --do-not-cache-result
+XDEBUG_MODE=off php vendor/bin/phpunit
 php vendor/bin/phpstan analyze --no-progress --debug
 php tests/browser.php > /tmp/sanitizer-browser.html
 timeout 30s env XDEBUG_MODE=off php -d memory_limit=64M tests/benchmark.php
 ```
 
-Run PHPUnit under both older PHP and PHP 8.4+. The security regression suite also
-runs its shared corpus directly through both backends when the native API is
-available. Open the generated browser file to check document and `innerHTML`
-reparsing and execution in sandboxed frames; it reports `passed: true` when all
-cases pass. Unsanitized positive controls verify that execution can be detected.
-Its CSP blocks external resources while allowing inline code and raster data
-images used to verify `srcset` loading.
+Run PHPUnit across PHP 7.1+ and PHP 8.4+. PHP 7.1 development installs use
+Composer 2.2 LTS and PHPUnit 7.5; the cross-version assertion polyfills keep the
+same security suite available there. Static analysis runs on a current PHP version.
+The security regression suite also runs its shared corpus directly through both
+backends when the native API is available. Open the generated browser file to
+check document and `innerHTML` reparsing and execution in sandboxed frames; it
+reports `passed: true` when all cases pass. Unsanitized positive controls verify
+that execution can be detected. Its CSP blocks external resources while allowing
+inline code and raster data images used to verify `srcset` loading.
 Functional tests assert sanitization and budget rejection without machine-speed
 thresholds. Run the benchmark separately on an idle worker under each PHP version;
 it reports runtime settings, median timings and growth across input sizes. The

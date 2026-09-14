@@ -142,7 +142,7 @@ class Limits
                     $text = true;
                     // Foreign content and script double escapes have different
                     // text states in the two parsers. Reject ambiguous markup.
-                    if( $foreignText || ($matches && $next !== '' && str_contains(self::WHITESPACE . '/', $next)) ) {
+                    if( $foreignText || ($matches && $next !== '' && strpos(self::WHITESPACE . '/', $next) !== false) ) {
                         return true;
                     }
                     if( $textElement === 'script' ) {
@@ -413,7 +413,7 @@ class Limits
      */
     private static function inForeign( array $foreign ) : bool
     {
-        return $foreign === [] ? false : $foreign[array_key_last( $foreign )];
+        return $foreign === [] ? false : $foreign[count( $foreign ) - 1];
     }
 
 
@@ -423,7 +423,7 @@ class Limits
         // Other characters produce different names in Masterminds and browsers;
         // reject those instead of truncating a name and changing parser state.
         $end = $start + strspn($input, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:_-', $start);
-        if( $end < $len && !str_contains(self::WHITESPACE . '/>', $input[$end]) ) {
+        if( $end < $len && strpos(self::WHITESPACE . '/>', $input[$end]) === false ) {
             return null;
         }
         return strtolower( substr( $input, $start, $end - $start ) );
@@ -464,14 +464,14 @@ class Limits
             if( $state === 3 ) {                        // unquoted value: ">" ends it, "<"/"/" are literal
                 if( $c === '>' ) { return $i; }
                 if( $c === '<' ) { $swallowed++; continue; }
-                if( str_contains(self::WHITESPACE, $c) ) {
+                if( strpos(self::WHITESPACE, $c) !== false ) {
                     $state = 0;
                     $beforeAttribute = true;
                 }
                 continue;
             }
             if( $state === 4 ) {                        // just saw "=", a value is about to start
-                if( str_contains(self::WHITESPACE, $c) ) { continue; }
+                if( strpos(self::WHITESPACE, $c) !== false ) { continue; }
                 if( $c === '"' ) { $state = 1; }
                 elseif( $c === "'" ) { $state = 2; }
                 elseif( $c === '>' ) { return $i; }
@@ -493,7 +493,7 @@ class Limits
                 if( $i + 1 < $len && ctype_alpha( $input[$i + 1] ) ) { return $i; }
                 $swallowed++;
             }
-            if( str_contains(self::WHITESPACE, $c) || $c === '/' ) {
+            if( strpos(self::WHITESPACE, $c) !== false || $c === '/' ) {
                 $beforeAttribute = true;
                 $prevSlash = $c === '/';
                 continue;

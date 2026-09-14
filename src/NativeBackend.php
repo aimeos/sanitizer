@@ -76,7 +76,9 @@ class NativeBackend
     private static function stripTemplateContent( \Dom\XPath $xpath ) : void
     {
         foreach( $xpath->document->querySelectorAll('template') as $node ) {
-            $node->parentNode?->replaceChild( $node->cloneNode(false), $node );
+            if( $node->parentNode !== null ) {
+                $node->parentNode->replaceChild( $node->cloneNode(false), $node );
+            }
         }
     }
 

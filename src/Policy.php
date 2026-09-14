@@ -183,7 +183,7 @@ class Policy
                 continue;
             }
             [$src, $uri] = [$candidate[1], $prefix[1]];
-            if( !str_starts_with( $src, $uri ) ) {
+            if( substr($src, 0, strlen($uri)) !== $uri ) {
                 continue;
             }
             $next = $src[strlen( $uri )] ?? '';
@@ -229,10 +229,10 @@ class Policy
             $origin = ($scheme === '' ? '' : $scheme . ':') . '//' . strtolower($host[1])
                 . ($port === null ? '' : ':' . $port);
             $resource = $match[3];
-            if( !str_starts_with( $resource, '/' ) ) {
+            if( substr($resource, 0, 1) !== '/' ) {
                 $resource = '/' . $resource;
             }
-        } elseif( str_starts_with($url, '//') || preg_match('/^[a-z][a-z0-9+.-]*:/i', $url) ) {
+        } elseif( substr($url, 0, 2) === '//' || preg_match('/^[a-z][a-z0-9+.-]*:/i', $url) ) {
             return null;
         }
         $path = substr( $resource, 0, strcspn($resource, '?#') );
@@ -325,7 +325,7 @@ class Policy
             if( self::isBlockedUri(rtrim($url, ',')) ) {
                 return true;
             }
-            if( str_ends_with($url, ',') ) {
+            if( substr($url, -1) === ',' ) {
                 continue;
             }
 
@@ -357,7 +357,7 @@ class Policy
         $rel = trim((string) preg_replace('/\s+/', ' ', trim($rel)), ' ');
         $padded = ' ' . $rel . ' ';
         foreach( ['noopener', 'noreferrer'] as $token ) {
-            if( !str_contains($padded, ' ' . $token . ' ') ) {
+            if( strpos($padded, ' ' . $token . ' ') === false ) {
                 $rel .= ($rel === '' ? '' : ' ') . $token;
             }
         }
@@ -399,7 +399,7 @@ class Policy
     public static function baseHrefCrossOrigin( string $href ) : bool
     {
         $href = str_replace('\\', '/', self::stripUrlControlChars($href));
-        return str_starts_with($href, '//') || (bool) preg_match('#^[a-zA-Z][a-zA-Z0-9+.-]*:#', $href);
+        return substr($href, 0, 2) === '//' || (bool) preg_match('#^[a-zA-Z][a-zA-Z0-9+.-]*:#', $href);
     }
 
 
@@ -421,7 +421,7 @@ class Policy
             return null;
         }
         $offset += $size;
-        if( $offset === $length || !str_contains($whitespace . ';,', $content[$offset]) ) {
+        if( $offset === $length || strpos($whitespace . ';,', $content[$offset]) === false ) {
             return null;
         }
         $offset += strspn($content, $whitespace, $offset);

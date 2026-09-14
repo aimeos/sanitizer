@@ -16,7 +16,7 @@ foreach( $backends as $backend ) {
         }
     }
     foreach( ['/\\untrusted.invalid/a.js', "/\t/untrusted.invalid/a.js", '/safe/../a.js', '/safe/%2e%2e/a.js', '/SAFE/a.js'] as $url ) {
-        $prefix = str_starts_with($url, '/safe/') || str_starts_with($url, '/SAFE/') ? '/safe/' : '/';
+        $prefix = substr($url, 0, 6) === '/safe/' || substr($url, 0, 6) === '/SAFE/' ? '/safe/' : '/';
         $cases[] = ['name' => $backend . ' URL ' . $url, 'html' => $backend::sanitize('<script src="' . $url . '"></script>', ['script' => [$prefix]])];
     }
     foreach( ['', ' href="https://untrusted.invalid/a.js"', ' xlink:href="https://untrusted.invalid/a.js"'] as $href ) {
@@ -38,7 +38,7 @@ foreach( $backends as $backend ) {
         $cases[] = ['name' => $backend . ' exception ' . $input, 'html' => $backend::sanitize($input, $allow), 'allowed' => array_keys($allow)];
     }
     foreach( require __DIR__ . '/fixtures/srcset.php' as $name => $case ) {
-        $value = preg_replace_callback('/[\x00-\x1f]/', fn($m) => '&#' . ord($m[0]) . ';', htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
+        $value = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
         $input = '<img srcset="' . $value . '">';
         $test = ['name' => $backend . ' srcset ' . $name, 'html' => $backend::sanitize($input, []), 'blockedSrcset' => $case['blocked']];
         $cases[] = $test;
@@ -47,7 +47,7 @@ foreach( $backends as $backend ) {
         }
     }
     foreach( require __DIR__ . '/fixtures/ping.php' as $name => $case ) {
-        $value = preg_replace_callback('/[\x00-\x1f]/', fn($m) => '&#' . ord($m[0]) . ';', htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
+        $value = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
         foreach( ['a', 'area'] as $tag ) {
             $input = '<' . $tag . ' href="/" ping="' . $value . '">' . ($tag === 'a' ? 'click</a>' : '');
             $cases[] = [
@@ -58,7 +58,7 @@ foreach( $backends as $backend ) {
         }
     }
     foreach( require __DIR__ . '/fixtures/meta-refresh.php' as $name => $case ) {
-        $value = preg_replace_callback('/[\x00-\x1f]/', fn($m) => '&#' . ord($m[0]) . ';', htmlspecialchars($case['content'], ENT_QUOTES, 'UTF-8'));
+        $value = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['content'], ENT_QUOTES, 'UTF-8'));
         $input = '<meta http-equiv="ReFrEsH" content="' . $value . '">';
         foreach( [true, ['https://trusted.example/safe/']] as $allow ) {
             $cases[] = [
@@ -112,8 +112,8 @@ foreach( $publicInputs as $name => $input ) {
 <title>Sanitizer browser reparse check</title>
 <pre id="result">Running</pre>
 <script>
-const cases = <?= json_encode($cases, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR) ?>;
-const imageCases = <?= json_encode($imageCases, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_THROW_ON_ERROR) ?>;
+const cases = <?= json_encode($cases, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+const imageCases = <?= json_encode($imageCases, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 const failures = [];
 const forbidden = ['script', 'style', 'iframe', 'object', 'embed', 'svg', 'math', 'template', 'noscript', 'base', 'meta', 'link'];
 const scalarUrls = ['href', 'src', 'xlink:href', 'formaction', 'action', 'background', 'poster', 'data', 'cite', 'longdesc'];

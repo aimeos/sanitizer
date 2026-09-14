@@ -6,8 +6,12 @@ namespace Aimeos\Sanitizer;
 /** Shared DOM operations supported by both the legacy and native APIs. @internal */
 class Tree
 {
-    /** Check the actual parsed tree and remove comments without recursion or XPath. */
-    public static function prepare( \DOMNode|\Dom\Node $root ) : bool
+    /**
+     * Check the actual parsed tree and remove comments without recursion or XPath.
+     *
+     * @param \DOMNode|\Dom\Node $root
+     */
+    public static function prepare( $root ) : bool
     {
         $node = $root;
         $depth = $nodes = $attrWork = $attrTotal = 0;
@@ -38,8 +42,8 @@ class Tree
                 $depth--;
             }
             $next = $node === $root ? null : $node->nextSibling;
-            if( $comment !== null ) {
-                $comment->parentNode?->removeChild( $comment );
+            if( $comment !== null && $comment->parentNode !== null ) {
+                $comment->parentNode->removeChild( $comment );
             }
             if( $next === null ) {
                 return true;
@@ -53,9 +57,10 @@ class Tree
      * Filter descendants in document order, skipping a branch as soon as its
      * element is removed. The full tree budget must already have been checked.
      *
+     * @param \DOMNode|\Dom\Node $root
      * @param array<string, bool|list<string>> $allow
      */
-    public static function sanitize( \DOMNode|\Dom\Node $root, array $allow, bool $strict ) : void
+    public static function sanitize( $root, array $allow, bool $strict ) : void
     {
         $node = $root->firstChild;
         while( $node !== null ) {
@@ -78,8 +83,11 @@ class Tree
     }
 
 
-    /** @param array<string, bool|list<string>> $allow */
-    public static function sanitizeElement( \DOMElement|\Dom\Element $node, array $allow, bool $strict ) : void
+    /**
+     * @param \DOMElement|\Dom\Element $node
+     * @param array<string, bool|list<string>> $allow
+     */
+    public static function sanitizeElement( $node, array $allow, bool $strict ) : void
     {
         $tag = strtolower( $node->tagName );
         // Native HTML tagName is upper-case; foreign/prefixed names stay distinct.
@@ -93,7 +101,9 @@ class Tree
         $structural = in_array( $tag, ['html', 'head', 'body', 'frameset'], true );
         if( ($strict && !in_array($node->namespaceURI, [null, '', 'http://www.w3.org/1999/xhtml'], true))
             || (!$structural && Policy::elementBlocked($tag, $uri, $allow, $strict)) ) {
-            $node->parentNode?->removeChild( $node );
+            if( $node->parentNode !== null ) {
+                $node->parentNode->removeChild( $node );
+            }
             return;
         }
 
@@ -114,14 +124,18 @@ class Tree
         // unprefixed namespaces, so check ancestry as well as the namespace.
         // Keep script exceptions confined to ordinary HTML on both backends.
         if( $tag === 'script' && (trim($node->getAttribute('src') ?? '') === '' || self::inForeignContent($node)) ) {
-            $node->parentNode?->removeChild( $node );
+            if( $node->parentNode !== null ) {
+                $node->parentNode->removeChild( $node );
+            }
             return;
         }
         // Masterminds may retain malformed raw-text end tags which browsers
         // recognize on reparse. Preserve this guard for allowed style/script.
         if( in_array($tag, ['style', 'script'], true)
             && preg_match('#</' . $tag . '[\s/>]#i', (string) $node->textContent) ) {
-            $node->parentNode?->removeChild( $node );
+            if( $node->parentNode !== null ) {
+                $node->parentNode->removeChild( $node );
+            }
             return;
         }
         if( $refreshUrl !== null && Policy::isBlockedUri($refreshUrl) ) {
@@ -147,7 +161,8 @@ class Tree
     }
 
 
-    private static function inForeignContent( \DOMElement|\Dom\Element $node ) : bool
+    /** @param \DOMElement|\Dom\Element $node */
+    private static function inForeignContent( $node ) : bool
     {
         do {
             if( !in_array($node->namespaceURI, [null, '', 'http://www.w3.org/1999/xhtml'], true)

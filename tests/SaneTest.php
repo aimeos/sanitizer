@@ -2,8 +2,8 @@
 
 namespace Aimeos\Sanitizer\Tests;
 
-use PHPUnit\Framework\TestCase;
 use Aimeos\Sanitizer\Sane;
+use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 
 class SaneTest extends TestCase

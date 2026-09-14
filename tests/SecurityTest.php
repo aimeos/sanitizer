@@ -8,9 +8,7 @@ use Aimeos\Sanitizer\NativeBackend;
 use Aimeos\Sanitizer\Policy;
 use Aimeos\Sanitizer\Sane;
 use Aimeos\Sanitizer\Tree;
-use PHPUnit\Framework\Attributes\DataProvider;
-use PHPUnit\Framework\Attributes\RunInSeparateProcess;
-use PHPUnit\Framework\TestCase;
+use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 class SecurityTest extends TestCase
 {
@@ -23,7 +21,7 @@ class SecurityTest extends TestCase
         return $backends;
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testInputCannotSelectTheParserEncoding( string $backend ) : void
     {
         foreach( [
@@ -43,7 +41,7 @@ class SecurityTest extends TestCase
 
     public function testInvalidUtf8CannotHideParserWork() : void
     {
-        $attributes = implode(' ', array_map(fn($i) => 'a' . $i, range(1, 20000)));
+        $attributes = implode(' ', array_map(function( $i ) { return 'a' . $i; }, range(1, 20000)));
         foreach( ["\xff", "\x80", "\xc0\xaf", "\xe2\x82", "\xed\xa0\x80", "\xf4\x90\x80\x80"] as $invalid ) {
             foreach( [
                 'text' . $invalid,
@@ -63,7 +61,7 @@ class SecurityTest extends TestCase
         $this->assertFalse(Limits::exceeds(''));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testScriptExceptionsCannotEnableForeignScripts( string $backend ) : void
     {
         foreach( [true, ['/approved.js']] as $scripts ) {
@@ -79,7 +77,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testWhitespaceTargetsReceiveOpenerProtection( string $backend ) : void
     {
         foreach( [false, true] as $strict ) {
@@ -95,7 +93,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testRelMergingPreservesWholeTokens( string $backend ) : void
     {
         foreach( [
@@ -119,7 +117,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testIframeFeaturesPreserveDirectiveBoundaries( string $backend ) : void
     {
         foreach( [
@@ -142,8 +140,10 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[RunInSeparateProcess]
-    #[DataProvider('backends')]
+    /**
+     * @runInSeparateProcess
+     * @dataProvider backends
+     */
     public function testLargeRelFitsMemoryLimit( string $backend ) : void
     {
         ini_set('memory_limit', '64M');
@@ -159,14 +159,16 @@ class SecurityTest extends TestCase
         $this->assertLessThan(64 * 1024 * 1024, memory_get_peak_usage(true));
     }
 
-    #[RunInSeparateProcess]
-    #[DataProvider('backends')]
+    /**
+     * @runInSeparateProcess
+     * @dataProvider backends
+     */
     public function testLargeIframePermissionListsFitMemoryLimit( string $backend ) : void
     {
         ini_set('memory_limit', '64M');
         foreach( ['autoplay ' . str_repeat('x ', 1800000), str_repeat(';', 3000000)] as $features ) {
             $input = '<iframe src="/approved" allow="' . $features . '; camera; fullscreen; microphone"></iframe>';
-            $kept = str_starts_with($features, 'autoplay') ? rtrim($features) . '; fullscreen' : 'fullscreen';
+            $kept = substr($features, 0, 8) === 'autoplay' ? rtrim($features) . '; fullscreen' : 'fullscreen';
             $expected = '<iframe src="/approved" allow="' . $kept . '" sandbox="allow-scripts allow-popups"></iframe>';
             $this->assertFalse(Limits::exceeds($input));
             $this->assertSame($expected, $backend::sanitize($input, ['iframe' => ['/approved']]));
@@ -175,7 +177,7 @@ class SecurityTest extends TestCase
         $this->assertLessThan(64 * 1024 * 1024, memory_get_peak_usage(true));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testIpv6UrlsSurviveSerialization( string $backend ) : void
     {
         foreach( ['https://[::1]/safe', 'http://[2001:db8::1]:8080/image.png', '//[::1]/safe'] as $url ) {
@@ -186,7 +188,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testSerializationPreservesAttributeAndTextBoundaries( string $backend ) : void
     {
         $input = '<body title="wrapper"><p title="&quot;&lt;img src=x onerror=confirm(1)&gt;&amp;">'
@@ -227,7 +229,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testUrlPrefixesRejectAmbiguousOriginsAndPaths( string $backend ) : void
     {
         $cases = [
@@ -255,7 +257,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testUrlPrefixesPreserveSafeUrls( string $backend ) : void
     {
         foreach( [
@@ -274,7 +276,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testStrictProfilePreservesRichText( string $backend ) : void
     {
         $input = '<h2 title="Heading">Grüße 中文</h2><p><strong>bold</strong> <em>italic</em></p>'
@@ -286,7 +288,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testStrictProfileCannotEnableExecutableContent( string $backend ) : void
     {
         $input = '<script src="https://example.com/a.js"></script><style>body{display:none}</style>'
@@ -298,7 +300,7 @@ class SecurityTest extends TestCase
         $this->assertSame('<p>ok</p>', trim($backend::sanitize($input, $allow, true)));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testStrictProfileRemovesClobberingAndApplicationAttributes( string $backend ) : void
     {
         $input = '<a id="appConfig" name="url" href="/safe" class="widget" data-hint="&lt;img onerror=alert(1)&gt;"'
@@ -307,7 +309,7 @@ class SecurityTest extends TestCase
         $this->assertStringContainsString('id="appConfig"', $backend::sanitize($input, []));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testStrictProfileRestrictsSchemesByContext( string $backend ) : void
     {
         foreach( ['intent:open', 'custom:action', 'data:image/png;base64,AA==', 'javascript:alert(1)'] as $uri ) {
@@ -319,7 +321,7 @@ class SecurityTest extends TestCase
         $this->assertSame('<img>', trim($backend::sanitize('<img src="mailto:test@example.com">', [], true)));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testCorpusRemainsSafeWhenReparsed( string $backend ) : void
     {
         foreach( require __DIR__ . '/fixtures/security.php' as $label => $input ) {
@@ -338,7 +340,7 @@ class SecurityTest extends TestCase
                     $tag = strtolower($element->localName);
                     $this->assertNotContains($tag, ['script', 'style', 'iframe', 'svg', 'math', 'template', 'noscript'], $label);
                     foreach( $element->attributes as $attr ) {
-                        $this->assertFalse(str_starts_with(strtolower($attr->name), 'on'), $label);
+                        $this->assertFalse(substr(strtolower($attr->name), 0, 2) === 'on', $label);
                         if( in_array($attr->name, ['href', 'src'], true) ) {
                             $this->assertDoesNotMatchRegularExpression('/^[\x00-\x20]*(?:javascript|vbscript):/i', $attr->value, $label);
                         }
@@ -371,10 +373,10 @@ class SecurityTest extends TestCase
 
     public function testControlCharactersCannotHideAttributeWork() : void
     {
-        $flood = '<div ' . implode(' ', array_map(fn($i) => 'a' . $i, range(0, 4000))) . '>ok</div></div>';
+        $flood = '<div ' . implode(' ', array_map(function( $i ) { return 'a' . $i; }, range(0, 4000))) . '>ok</div></div>';
         foreach( array_merge(range(0, 32), [127]) as $code ) {
             $control = chr($code);
-            if( str_contains(" \t\r\n\f", $control) ) {
+            if( strpos(" \t\r\n\f", $control) !== false ) {
                 continue;
             }
             foreach( ['"', "'"] as $quote ) {
@@ -397,12 +399,12 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testPingChecksEveryUrl( string $backend ) : void
     {
         foreach( require __DIR__ . '/fixtures/ping.php' as $label => $case ) {
             $this->assertSame($case['blocked'], Policy::uriValueBlocked('ping', $case['value']), $label);
-            $value = preg_replace_callback('/[\x00-\x1f]/', fn($m) => '&#' . ord($m[0]) . ';', htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
+            $value = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
             foreach( ['a', 'area'] as $tag ) {
                 $input = '<' . $tag . ' href="/" ping="' . $value . '">' . ($tag === 'a' ? 'click</a>' : '');
                 foreach( [$backend::sanitize($input, []), Sane::html($input)] as $output ) {
@@ -421,12 +423,12 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testMetaRefreshChecksTheRedirectUrl( string $backend ) : void
     {
         foreach( require __DIR__ . '/fixtures/meta-refresh.php' as $label => $case ) {
             $this->assertSame($case['url'], Policy::metaRefreshUrl($case['content']), $label);
-            $content = preg_replace_callback('/[\x00-\x1f]/', fn($m) => '&#' . ord($m[0]) . ';', htmlspecialchars($case['content'], ENT_QUOTES, 'UTF-8'));
+            $content = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['content'], ENT_QUOTES, 'UTF-8'));
             $input = '<meta http-equiv="ReFrEsH" content="' . $content . '">';
             foreach( [true, ['https://trusted.example/safe/']] as $allow ) {
                 foreach( [$backend::sanitize($input, ['meta' => $allow]), Sane::html($input, ['meta' => $allow])] as $output ) {
@@ -455,13 +457,13 @@ class SecurityTest extends TestCase
         $this->assertSame($input, Sane::html($input, $allow));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testSrcsetPreservesCandidateBoundaries( string $backend ) : void
     {
         foreach( require __DIR__ . '/fixtures/srcset.php' as $label => $case ) {
             $this->assertSame($case['blocked'], Policy::uriValueBlocked('srcset', $case['value']), $label);
             // Character references give both parsers the same decoded controls.
-            $value = preg_replace_callback('/[\x00-\x1f]/', fn($m) => '&#' . ord($m[0]) . ';', htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
+            $value = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
             foreach( ['img', 'source'] as $tag ) {
                 $input = '<' . $tag . ' srcset="' . $value . '">';
                 $output = $backend::sanitize($input, []);
@@ -474,15 +476,15 @@ class SecurityTest extends TestCase
                 $this->assertStringNotContainsString('srcset=', $backend::sanitize($input, [], true), $label);
             }
             $input = '<img srcset="' . $value . '">';
-            $this->assertSame(!$case['blocked'], str_contains(Sane::html($input), 'srcset='), $label);
+            $this->assertSame(!$case['blocked'], strpos(Sane::html($input), 'srcset=') !== false, $label);
             $this->assertSame('<img>', Sane::strict($input), $label);
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testQuotedFormFeedsRemainAttributeText( string $backend ) : void
     {
-        $value = "\f><div " . implode(' ', array_map(fn($i) => 'a' . $i, range(0, 20000)))
+        $value = "\f><div " . implode(' ', array_map(function( $i ) { return 'a' . $i; }, range(0, 20000)))
             . '><img src=x onerror=confirm(55)></div>';
         foreach( ['"', "'"] as $quote ) {
             $input = '<p title=' . $quote . $value . $quote . ' onclick="bad()">ok</p><p>after</p>';
@@ -504,7 +506,7 @@ class SecurityTest extends TestCase
         $this->assertSame('<p title="tip" lang="en" dir="ltr">ok</p>', Sane::strict($input));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testQuotedControlsSurviveRepeatedSanitization( string $backend ) : void
     {
         foreach( [9, 10, 12] as $code ) {
@@ -530,7 +532,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[RunInSeparateProcess]
+    /** @runInSeparateProcess */
     public function testLegacyScannerRejectsDiagnosticFloodWithinMemoryLimit() : void
     {
         ini_set('memory_limit', '64M');
@@ -603,7 +605,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testManyValidCharacterReferencesStillWork( string $backend ) : void
     {
         $input = str_repeat('&amp;&lt;&gt;&quot;', 20000);
@@ -615,7 +617,7 @@ class SecurityTest extends TestCase
         $this->assertSame($expected, Sane::strict($input));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testFilteringContinuesAfterRemovedBranches( string $backend ) : void
     {
         $input = '<script>bad</script><p onclick="bad()">first'
@@ -688,7 +690,7 @@ class SecurityTest extends TestCase
         $this->assertTrue(Limits::exceeds('<style><!--</style>' . str_repeat('<div>', 1000)));
     }
 
-    #[RunInSeparateProcess]
+    /** @runInSeparateProcess */
     public function testNonElementNodeFloodsAreRejectedBeforeParsing() : void
     {
         ini_set('memory_limit', '64M');
@@ -741,7 +743,7 @@ class SecurityTest extends TestCase
         $this->assertSame(str_repeat('a &lt; 1 &amp; ', 1000), Sane::strict($input));
     }
 
-    #[RunInSeparateProcess]
+    /** @runInSeparateProcess */
     public function testFormattingReconstructionIsBoundedBeforeParsing() : void
     {
         ini_set('memory_limit', '64M');
@@ -804,7 +806,7 @@ class SecurityTest extends TestCase
         $this->assertSame('<p>ok</p>', Sane::strict('<textarea>' . $literal . '</textarea><p>ok</p>'));
     }
 
-    #[RunInSeparateProcess]
+    /** @runInSeparateProcess */
     public function testTotalAttributeAllocationIsBoundedBeforeParsing() : void
     {
         ini_set('memory_limit', '64M');
@@ -827,7 +829,7 @@ class SecurityTest extends TestCase
         $this->assertLessThan(64 * 1024 * 1024, memory_get_peak_usage(true));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testParsedBudgetIncludesTotalAttributes( string $backend ) : void
     {
         $doc = $backend === NativeBackend::class
@@ -845,7 +847,7 @@ class SecurityTest extends TestCase
         $this->assertFalse(Tree::prepare($doc));
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testLiteralLessThanSurvivesWithoutRevivingMarkup( string $backend ) : void
     {
         foreach( [
@@ -870,7 +872,7 @@ class SecurityTest extends TestCase
         }
     }
 
-    #[DataProvider('backends')]
+    /** @dataProvider backends */
     public function testParsedBudgetCountsNonElementNodes( string $backend ) : void
     {
         foreach( ['createComment', 'createTextNode'] as $factory ) {
