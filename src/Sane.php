@@ -20,13 +20,31 @@ class Sane
      *   <script> is dropped (only scripts loading from an external src are
      *   kept). Other inline content such as <style> CSS is kept verbatim, so
      *   only pass true for tags you fully trust.
-     * - list<string> keeps the element only when its URL starts with one of the
-     *   given prefixes; embedding tags are additionally reduced to a safe
-     *   attribute allow-list and sandboxed.
+     * - list<string> keeps the element only when its URL matches one of the
+     *   given origin/path prefixes; embedding tags receive a restricted attribute
+     *   list and iframes are sandboxed. Ambiguous URLs and dot segments are rejected.
      *
      * @param array<string, bool|list<string>> $allow
      */
     public static function html( string $input, array $allow = [] ) : string
+    {
+        return self::sanitize( $input, $allow, false );
+    }
+
+
+    /**
+     * Sanitizes untrusted rich text using fixed HTML element/attribute allow-lists.
+     * Removes unknown elements with their contents and all id/name attributes.
+     * Executable content cannot be enabled in this profile.
+     */
+    public static function strict( string $input ) : string
+    {
+        return self::sanitize( $input, [], true );
+    }
+
+
+    /** @param array<string, bool|list<string>> $allow */
+    private static function sanitize( string $input, array $allow, bool $strict ) : string
     {
         // Reject hostile input before the parser and pipeline run on it. The caps
         // fence off the input classes that drive the (Masterminds) parser's O(n^2)
@@ -35,14 +53,12 @@ class Sane
             return '';
         }
 
-        // PHP 8.4+: parse with the native, spec-compliant, O(n) HTML5 parser
-        // (lexbor) and serialize with it too, so even crafted misnested tag soup
-        // can't drive the parser into superlinear time. Falls back to the
-        // Masterminds path on PHP 8.0-8.3.
+        // Use the native HTML5 parser where available. Both backends still need
+        // resource limits, including checks on the tree produced by the parser.
         if( class_exists( '\Dom\HTMLDocument' ) ) {
-            return NativeBackend::sanitize( $input, $allow );
+            return NativeBackend::sanitize( $input, $allow, $strict );
         }
 
-        return LegacyBackend::sanitize( $input, $allow );
+        return LegacyBackend::sanitize( $input, $allow, $strict );
     }
 }

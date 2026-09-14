@@ -5,31 +5,34 @@ namespace Aimeos\Sanitizer;
 
 /**
  * Masterminds (pure-PHP HTML5) sanitization path for PHP 8.0-8.3, where the
- * native parser is unavailable. Identical behaviour to NativeBackend, modulo
- * cosmetic serialization differences.
- *
- * Parses with the HTML5 algorithm (matching browsers) so the
- * parse → sanitize → serialize → browser-reparse cycle stays consistent and
- * can't be exploited via parser-differential mutation XSS the way the libxml
- * HTML4 parser could.
+ * native parser is unavailable. Shares Policy and Tree with NativeBackend while
+ * retaining corrections for differences between Masterminds and browser parsing.
+ * Allowed template contents are sanitized here; the native
+ * backend discards those contents because its API cannot reach them.
  */
 class LegacyBackend
 {
+    private const MAX_ERRORS = 2048;
+
     /**
      * @param array<string, bool|list<string>> $allow
      */
-    public static function sanitize( string $input, array $allow ) : string
+    public static function sanitize( string $input, array $allow, bool $strict = false ) : string
     {
         $html5 = new \Masterminds\HTML5(['disable_html_ns' => true]);
-        $doc = $html5->loadHTML('<!DOCTYPE html><html><body>' . $input . '</body></html>');
+        $doc = self::parse($input);
+        if( $doc === null ) {
+            return '';
+        }
 
         $xpath = new \DOMXPath($doc);
 
-        $removeSet = self::applyAllowList( $xpath, $allow );
+        if( !Tree::prepare($doc) ) {
+            return '';
+        }
 
-        // <noscript>/<meta>/<script> only survive removal when explicitly
-        // allowed, so their dedicated passes run only then; CDATA only when the
-        // marker is present.
+        // Collapse allowed noscript content before applying the shared policy;
+        // convert CDATA nodes only when the marker is present.
         if( isset( $allow['noscript'] ) ) {
             self::collapseNoscript( $xpath, $doc );
         }
@@ -37,48 +40,112 @@ class LegacyBackend
             self::neutralizeCdata( $xpath, $doc );
         }
 
-        self::sanitizeNodes( $xpath, $doc, $removeSet );
+        Tree::sanitize( $doc, $allow, $strict );
 
-        if( isset( $allow['style'] ) || isset( $allow['script'] ) ) {
-            self::dropRawTextBreakouts( $xpath );
-        }
-        if( isset( $allow['meta'] ) ) {
-            self::checkMetaRefresh( $xpath );
-        }
-        if( isset( $allow['script'] ) ) {
-            self::dropInlineScripts( $xpath );
-        }
         self::unwrapStructural( $xpath );
 
-        return self::serializeBody( $doc );
+        return self::serializeBody( $doc, $html5 );
     }
 
 
-    /**
-     * Opts the elements in $allow back in (hardened) and returns the still-blocked
-     * element names, keyed by tag, for removal in the main pass.
-     *
-     * @param array<string, bool|list<string>> $allow
-     * @return array<string, true>
-     */
-    private static function applyAllowList( \DOMXPath $xpath, array $allow ) : array
+    /** Parse with bounded errors and without unused source-position diagnostics. */
+    private static function parse( string $input ) : ?\DOMDocument
     {
-        $removeSet = [];
-        foreach (Policy::REMOVE_ELEMENTS as $tag) {
-            if( isset( $allow[$tag] ) ) {
-                if( $allow[$tag] === true ) {
-                    self::hardenAllowed( $xpath, $tag );
-                    if( $tag === 'base' ) {
-                        self::restrictBaseHref( $xpath );
-                    }
-                    continue;
-                }
-                self::filterByUri( $xpath, $tag, array_values( array_filter( (array) $allow[$tag], 'is_string' ) ) );
-                continue;
-            }
-            $removeSet[$tag] = true;
+        $input = \Masterminds\HTML5\Parser\UTF8Utils::convertToUTF8('<!DOCTYPE html><html><body>' . $input . '</body></html>', 'UTF-8');
+        // Match Scanner's null/control/noncharacter diagnostics after its UTF-8
+        // conversion, before it allocates one array entry per error. Omit the
+        // matches argument so counting itself uses constant auxiliary memory.
+        // Keep the byte ranges aligned with UTF8Utils::checkForIllegalCodepoints.
+        $errors = preg_match_all('/(?:
+            [\x00-\x08\x0B\x0E-\x1F\x7F]
+            | \xC2[\x80-\x9F]
+            | \xED(?:\xA0[\x80-\xFF]|[\xA1-\xBE][\x00-\xFF]|\xBF[\x00-\xBF])
+            | \xEF\xB7[\x90-\xAF]
+            | \xEF\xBF[\xBE\xBF]
+            | [\xF0-\xF4][\x8F-\xBF]\xBF[\xBE\xBF]
+        )/x', $input);
+        if( $errors === false || $errors > self::MAX_ERRORS ) {
+            return null;
         }
-        return $removeSet;
+
+        $events = new class(self::MAX_ERRORS - $errors) extends \Masterminds\HTML5\Parser\DOMTreeBuilder {
+            public function __construct( private int $remainingErrors )
+            {
+                parent::__construct(false, ['disable_html_ns' => true]);
+            }
+
+            /**
+             * @param string $msg
+             * @param int $line
+             * @param int $col
+             */
+            public function parseError( $msg, $line = 0, $col = 0 ) : void
+            {
+                // Count scanner, tokenizer and tree-repair errors together, without
+                // retaining diagnostics that the sanitizer never consumes.
+                if( --$this->remainingErrors < 0 ) {
+                    throw new \OverflowException('HTML parse error budget exceeded');
+                }
+            }
+        };
+        $scanner = new \Masterminds\HTML5\Parser\Scanner($input, 'UTF-8');
+        $parser = new class($scanner, $events) extends \Masterminds\HTML5\Parser\Tokenizer {
+            protected function consumeData() : bool
+            {
+                if( $this->textMode === 0 ) {
+                    // Finish references separately: upstream can otherwise decode
+                    // one and discard a following literal '<' in the same call.
+                    if( $this->scanner->current() === '&' ) {
+                        $this->buffer($this->decodeCharacterReference());
+                        return $this->carryOn;
+                    }
+                    $next = $this->scanner->peek();
+                    if( $this->scanner->current() === '<' && !in_array($next, ['!', '/', '?'], true)
+                        && !$this->is_alpha($next) ) {
+                        $this->parseError('Illegal tag opening');
+                        $this->buffer('<');
+                        $this->scanner->consume();
+                        return $this->carryOn;
+                    }
+                }
+                return parent::consumeData();
+            }
+
+            /** @param string $quote */
+            protected function quotedAttributeValue( $quote ) : string
+            {
+                // HTML keeps form feeds inside quoted values. Upstream treats
+                // them as closing quotes, exposing attribute text as new markup.
+                $value = '';
+                while( ($text = $this->scanner->charsUntil($quote . '&')) !== false ) {
+                    $value .= $text;
+                    if( $this->scanner->current() !== '&' ) {
+                        break;
+                    }
+                    $value .= $this->decodeCharacterReference(true);
+                }
+                $this->scanner->consume();
+                return $value;
+            }
+
+            /**
+             * @param string $msg
+             * @return false
+             */
+            protected function parseError( $msg ) // @phpstan-ignore method.childReturnType (Upstream documents string but always returns false.)
+            {
+                // Upstream recomputes line/column by rescanning the input for
+                // every error. Keep error recovery, but skip that quadratic work.
+                $this->events->parseError('');
+                return false;
+            }
+        };
+        try {
+            $parser->parse();
+        } catch( \OverflowException ) {
+            return null;
+        }
+        return $events->document();
     }
 
 
@@ -129,181 +196,6 @@ class LegacyBackend
 
 
     /**
-     * Strips comments (via a linear DOM walk) and then makes a single pass over
-     * every element: removes blocked and script-bearing SVG elements and, on each
-     * survivor, strips event-handler/style/dangerous-URI and clobbering id/name
-     * attributes and adds rel="noopener noreferrer" to links opening a new context.
-     *
-     * @param array<string, true> $removeSet
-     */
-    private static function sanitizeNodes( \DOMXPath $xpath, \DOMDocument $doc, array $removeSet ) : void
-    {
-        $animSet = array_flip( Policy::UNSAFE_SVG_ELEMENTS );
-        $blockedSet = array_flip( Policy::BLOCKED_NAMES );
-        $uriSet = array_flip( Policy::URI_ATTRIBUTES );
-
-        // Remove comments with a linear DOM walk: the "//comment()" xpath is
-        // ~O(n^2) in libxml on comment-heavy input (a cheap DoS), unlike "//*".
-        if( $doc->documentElement !== null ) {
-            self::removeComments( $doc->documentElement );
-        }
-
-        $nodes = $xpath->query('//*');
-        if( $nodes === false ) {
-            return;
-        }
-        foreach ($nodes as $node) {
-            if( !$node instanceof \DOMElement ) {
-                continue;
-            }
-            $tag = $node->nodeName;
-            if( isset( $removeSet[$tag] ) || isset( $animSet[strtolower($tag)] ) ) {
-                $node->parentNode?->removeChild($node);
-                continue;
-            }
-
-            $remove = [];
-            $newWindow = false;
-            foreach ($node->attributes as $attribute) {
-                $name = $attribute->name;
-
-                if( stripos($name, 'on') === 0 || $name === 'style' ) {
-                    $remove[] = $attribute;
-                    continue;
-                }
-                if( $name === 'id' || $name === 'name' ) {
-                    // DOM clobbering: drop id/name shadowing a window/document property
-                    if( isset( $blockedSet[$attribute->value] ) ) {
-                        $remove[] = $attribute;
-                    }
-                    continue;
-                }
-                if( $name === 'target' ) {
-                    // A <base target> sets the default browsing context for every
-                    // link in the document, so a tabnabbing target there can't be
-                    // hardened per link — drop it. Any other target that opens a
-                    // separate context (anything but _self/_parent/_top, matched
-                    // case-insensitively, incl. "_blank" and named windows) gets the
-                    // rel="noopener noreferrer" hardening below.
-                    if( $tag === 'base' ) {
-                        $remove[] = $attribute;
-                    } elseif( !in_array( strtolower( trim( $attribute->value ) ), ['', '_self', '_parent', '_top'], true ) ) {
-                        $newWindow = true;
-                    }
-                    continue;
-                }
-
-                // Match the full and local name so namespaced URI attributes
-                // such as xlink:href (local name "href") are checked too.
-                $local = $attribute->localName;
-                if( !isset( $uriSet[$name] ) && ( $local === null || !isset( $uriSet[$local] ) ) ) {
-                    continue;
-                }
-                // The attribute value is already entity-decoded to what the
-                // browser sees, so it is checked as-is.
-                if (Policy::uriValueBlocked($local, trim($attribute->value))) {
-                    $remove[] = $attribute;
-                }
-            }
-            foreach ($remove as $attribute) {
-                $node->removeAttributeNode($attribute);
-            }
-
-            if( $newWindow && ($tag === 'a' || $tag === 'area' || $tag === 'form') ) {
-                $node->setAttribute('rel', Policy::mergeRel($node->getAttribute('rel')));
-            }
-        }
-    }
-
-
-    /**
-     * Recursively removes every comment node under $node. Used instead of an
-     * "//comment()" xpath, which libxml evaluates in ~O(n^2) on comment-heavy input.
-     */
-    private static function removeComments( \DOMNode $node ) : void
-    {
-        $child = $node->firstChild;
-        while( $child !== null ) {
-            $next = $child->nextSibling;
-            if( $child instanceof \DOMComment ) {
-                $node->removeChild( $child );
-            } elseif( $child->hasChildNodes() ) {
-                self::removeComments( $child );
-            }
-            $child = $next;
-        }
-    }
-
-
-    /**
-     * Neutralizes <meta http-equiv="refresh"> redirects whose URL uses a blocked
-     * scheme. Only reachable when meta is allowed.
-     */
-    private static function checkMetaRefresh( \DOMXPath $xpath ) : void
-    {
-        $nodes = $xpath->query('//meta[@content]');
-        if( $nodes === false ) {
-            return;
-        }
-        foreach ($nodes as $node) {
-            if( $node instanceof \DOMElement
-                && Policy::metaRefreshBlocked($node->getAttribute('content'), $node->getAttribute('http-equiv'))
-            ) {
-                $node->removeAttribute('content');
-            }
-        }
-    }
-
-
-    /**
-     * Drops kept <style>/<script> elements whose raw-text content would let a
-     * browser break out of the element. The Masterminds parser only ends these
-     * raw-text elements on the exact "</style>"/"</script>", but the HTML5 spec
-     * (and every browser) also ends them at "</style"/"</script" followed by
-     * whitespace, "/" or ">". Such a stray end tag therefore stays inert raw text
-     * here — so the markup after it is never sanitized — while libxml emits
-     * style/script content unescaped, freeing it as live elements on reparse
-     * (e.g. "<style></style/><img src=x onerror=alert(1)>"). Only reachable when
-     * style or script is allowed.
-     */
-    private static function dropRawTextBreakouts( \DOMXPath $xpath ) : void
-    {
-        $nodes = $xpath->query('//style | //script');
-        if( $nodes === false ) {
-            return;
-        }
-        foreach( $nodes as $node ) {
-            if( !$node instanceof \DOMElement ) {
-                continue;
-            }
-            $tag = strtolower( $node->nodeName );
-            if( preg_match( '#</' . $tag . '[\s/>]#i', $node->textContent ) ) {
-                $node->parentNode?->removeChild( $node );
-            }
-        }
-    }
-
-
-    /**
-     * Drops inline scripts; an allowed <script> is only kept when it loads from an
-     * external src that survived the scheme check. Only reachable when script is
-     * allowed.
-     */
-    private static function dropInlineScripts( \DOMXPath $xpath ) : void
-    {
-        $nodes = $xpath->query('//script');
-        if( $nodes === false ) {
-            return;
-        }
-        foreach ($nodes as $node) {
-            if( $node instanceof \DOMElement && trim($node->getAttribute('src')) === '' ) {
-                $node->parentNode?->removeChild($node);
-            }
-        }
-    }
-
-
-    /**
      * Unwraps structural document elements (<html>/<head>/<body>/<title>/<frameset>)
      * the parser may have nested inside the wrapper body, so they don't leak into
      * the fragment output (and can't inject attributes into a host page's body/html
@@ -328,164 +220,17 @@ class LegacyBackend
     }
 
 
-    /**
-     * Returns the sanitized content of the wrapper body. Its own attributes are
-     * never part of the output and are cleared so the wrapper-tag strip stays
-     * robust even if the parser merged input <body> attributes onto it; serializing
-     * once is much faster than a saveHTML() call per child for many top-level nodes.
-     */
-    private static function serializeBody( \DOMDocument $doc ) : string
+    /** Serialize the body children together, excluding the wrapper and its attributes. */
+    private static function serializeBody( \DOMDocument $doc, \Masterminds\HTML5 $html5 ) : string
     {
         $body = $doc->getElementsByTagName('body')->item(0);
         if( !$body instanceof \DOMElement ) {
             return '';
         }
-        while( $body->attributes->length > 0 ) {
-            $attr = $body->attributes->item(0);
-            if( !$attr instanceof \DOMAttr ) {
-                break;
-            }
-            $body->removeAttributeNode( $attr );
-        }
-        // Serialize with libxml's saveHTML (a native DOMDocument method): the tree
-        // was already built by the HTML5 parser, and libxml's serializer is ~25x
-        // faster and escapes attribute/text content safely (it picks a
-        // non-conflicting quote delimiter and entity-encodes <, >, & and the
-        // delimiter), so the browser re-parses the output identically.
-        $html = (string) preg_replace('#^\s*<body[^>]*>#i', '', (string) $doc->saveHTML( $body ));
-        return (string) preg_replace('#</body>\s*$#i', '', $html);
+        // libxml's HTML serializer rewrites URI attributes (including IPv6 host
+        // brackets). Use HTML5 serialization to preserve the URLs we checked.
+        return $html5->saveHTML( $body->childNodes );
     }
 
 
-    /**
-     * @param list<string> $uris
-     */
-    private static function filterByUri( \DOMXPath $xpath, string $tag, array $uris ) : void
-    {
-        $uriAttr = Policy::TAG_URI_ATTR[$tag] ?? null;
-        $nodes = $xpath->query("//{$tag}");
-
-        if( $nodes === false ) {
-            return;
-        }
-
-        // Tag has no URI attribute — remove all instances defensively
-        if( $uriAttr === null )
-        {
-            foreach( $nodes as $node ) {
-                if( $node instanceof \DOMNode ) {
-                    $node->parentNode?->removeChild( $node );
-                }
-            }
-            return;
-        }
-
-        foreach( $nodes as $node )
-        {
-            if( !$node instanceof \DOMElement ) {
-                continue;
-            }
-
-            $val = trim( $node->getAttribute( $uriAttr ) );
-
-            if( !$val || !Policy::isAllowedUri( $val, $uris ) || Policy::isBlockedUri( $val ) )
-            {
-                $node->parentNode?->removeChild( $node );
-                continue;
-            }
-
-            // Strip attributes and enforce sandbox only for embedding tags
-            self::hardenAttributes( $node, $tag );
-        }
-    }
-
-
-    /**
-     * Removes an absolute or protocol-relative href from <base> elements allowed
-     * unconditionally, so they cannot repoint every relative URL to another
-     * origin. Bases allowed via a URL-prefix list are already origin-restricted.
-     */
-    private static function restrictBaseHref( \DOMXPath $xpath ) : void
-    {
-        $nodes = $xpath->query('//base[@href]');
-        if( $nodes === false ) {
-            return;
-        }
-
-        foreach( $nodes as $node ) {
-            if( $node instanceof \DOMElement && Policy::baseHrefCrossOrigin( $node->getAttribute('href') ) ) {
-                $node->removeAttribute('href');
-            }
-        }
-    }
-
-
-    /**
-     * Applies attribute hardening to every instance of an embedding tag that was
-     * allowed unconditionally (allow[$tag] === true), so an allowed iframe still
-     * cannot keep a script-executing srcdoc attribute or skip its sandbox.
-     */
-    private static function hardenAllowed( \DOMXPath $xpath, string $tag ) : void
-    {
-        if( !isset( Policy::SAFE_ATTRS[$tag] ) ) {
-            return;
-        }
-
-        $nodes = $xpath->query( "//{$tag}" );
-        if( $nodes === false ) {
-            return;
-        }
-
-        foreach( $nodes as $node ) {
-            if( $node instanceof \DOMElement ) {
-                self::hardenAttributes( $node, $tag );
-            }
-        }
-    }
-
-
-    /**
-     * Removes every attribute not on the per-tag allow-list from an embedding
-     * element and enforces a sandbox where applicable. Embedding tags can carry
-     * script-executing attributes (e.g. iframe's srcdoc), so anything outside
-     * the allow-list is dropped.
-     */
-    private static function hardenAttributes( \DOMElement $node, string $tag ) : void
-    {
-        if( !isset( Policy::SAFE_ATTRS[$tag] ) ) {
-            return;
-        }
-
-        $safe = Policy::SAFE_ATTRS[$tag];
-        $attrsToRemove = [];
-
-        foreach( $node->attributes as $attr ) {
-            if( !in_array( $attr->name, $safe, true ) ) {
-                $attrsToRemove[] = $attr;
-            }
-        }
-
-        foreach( $attrsToRemove as $attr ) {
-            $node->removeAttributeNode( $attr );
-        }
-
-        // Restrict the iframe Permissions-Policy "allow" attribute to safe
-        // features so an allowed embed can't request e.g. camera or microphone.
-        if( $tag === 'iframe' && $node->hasAttribute( 'allow' ) ) {
-            $allow = Policy::filterAllowFeatures( $node->getAttribute( 'allow' ) );
-            if( $allow !== '' ) {
-                $node->setAttribute( 'allow', $allow );
-            } else {
-                $node->removeAttribute( 'allow' );
-            }
-        }
-
-        if( in_array( $tag, ['iframe', 'frame'], true ) ) {
-            // No allow-same-origin: together with allow-scripts it lets
-            // same-origin framed content remove its own sandbox and escape.
-            // (Browsers ignore the attribute on <frame>, which cannot be
-            // sandboxed — avoid allowing <frame> for untrusted origins.)
-            $node->setAttribute( 'sandbox', 'allow-scripts allow-popups' );
-        }
-    }
 }

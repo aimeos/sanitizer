@@ -13,7 +13,7 @@ class Policy
 {
     // Unsafe elements to remove completely. Includes raw-text elements
     // (plaintext, xmp, noembed, noframes) whose content browsers parse as text
-    // but the libxml DOM does not, to avoid parser-differential surprises.
+    // which the legacy parser may interpret differently.
     /** @var list<string> */
     public const REMOVE_ELEMENTS = ['applet', 'base', 'embed', 'form', 'frame', 'iframe', 'link', 'math', 'meta', 'noembed', 'noframes', 'noscript', 'object', 'plaintext', 'portal', 'script', 'style', 'svg', 'template', 'xmp'];
 
@@ -83,34 +83,109 @@ class Policy
         'writeln', 'querySelector', 'querySelectorAll'
     ];
 
+    /** @var list<string> Rich-text HTML only; unknown elements and their children are removed. */
+    public const STRICT_ELEMENTS = [
+        'a', 'abbr', 'address', 'article', 'aside', 'b', 'bdi', 'bdo', 'blockquote', 'br',
+        'caption', 'cite', 'code', 'col', 'colgroup', 'dd', 'del', 'details', 'dfn', 'div',
+        'dl', 'dt', 'em', 'figcaption', 'figure', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5',
+        'h6', 'header', 'hgroup', 'hr', 'i', 'img', 'ins', 'kbd', 'li', 'main', 'mark',
+        'nav', 'ol', 'p', 'pre', 'q', 'rp', 'rt', 'ruby', 's', 'samp', 'section', 'small',
+        'span', 'strong', 'sub', 'summary', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th',
+        'thead', 'time', 'tr', 'u', 'ul', 'var', 'wbr'
+    ];
+
+    /** @var list<string> No id/name, class, data-*, is, or framework directives. */
+    public const STRICT_GLOBAL_ATTRS = ['title', 'lang', 'dir', 'aria-label'];
+
+    /** @var array<string, list<string>> */
+    public const STRICT_ATTRS = [
+        'a' => ['href', 'target', 'rel'],
+        'blockquote' => ['cite'], 'q' => ['cite'],
+        'col' => ['span'], 'colgroup' => ['span'],
+        'del' => ['cite', 'datetime'], 'ins' => ['cite', 'datetime'],
+        'details' => ['open'],
+        'img' => ['src', 'alt', 'width', 'height', 'loading', 'decoding'],
+        'li' => ['value'], 'ol' => ['start', 'reversed', 'type'],
+        'td' => ['colspan', 'rowspan'], 'th' => ['colspan', 'rowspan', 'scope', 'abbr'],
+        'time' => ['datetime'],
+    ];
+
+
+    /** @param array<string, bool|list<string>> $allow */
+    public static function elementBlocked( string $tag, string $uri, array $allow, bool $strict ) : bool
+    {
+        if( $strict ) {
+            return !in_array( $tag, self::STRICT_ELEMENTS, true );
+        }
+        if( in_array( strtolower($tag), self::UNSAFE_SVG_ELEMENTS, true ) ) {
+            return true;
+        }
+        if( !in_array( $tag, self::REMOVE_ELEMENTS, true ) || ($allow[$tag] ?? false) === true ) {
+            return false;
+        }
+        $prefixes = $allow[$tag] ?? false;
+        return !isset( self::TAG_URI_ATTR[$tag] ) || !is_array( $prefixes )
+            || !self::isAllowedUri( $uri, array_values(array_filter($prefixes, 'is_string')) ) || self::isBlockedUri( $uri );
+    }
+
+
+    public static function attributeBlocked( string $tag, string $name, ?string $local, string $value, bool $strict ) : bool
+    {
+        if( $strict && !in_array( $name, self::STRICT_GLOBAL_ATTRS, true )
+            && !in_array( $name, self::STRICT_ATTRS[$tag] ?? [], true ) ) {
+            return true;
+        }
+        if( stripos( $name, 'on' ) === 0 || $name === 'style' || ($tag === 'base' && $name === 'target') ) {
+            return true;
+        }
+        if( $name === 'id' || $name === 'name' ) {
+            return in_array( $value, self::BLOCKED_NAMES, true );
+        }
+        if( !in_array( $name, self::URI_ATTRIBUTES, true ) && !in_array( $local, self::URI_ATTRIBUTES, true ) ) {
+            return false;
+        }
+        if( $strict ) {
+            $url = self::stripUrlControlChars( $value );
+            if( preg_match( '/^([a-z][a-z0-9+.-]*):/i', $url, $match ) ) {
+                $schemes = $tag === 'a' ? ['http', 'https', 'mailto', 'tel'] : ['http', 'https'];
+                if( !in_array( strtolower($match[1]), $schemes, true )
+                    && !($tag === 'img' && $name === 'src' && strtolower($match[1]) === 'data') ) {
+                    return true;
+                }
+            }
+        }
+        return self::uriValueBlocked( $local, trim($value) );
+    }
+
+
+    public static function opensNewContext( string $target ) : bool
+    {
+        // Browsers compare target keywords without trimming whitespace.
+        return !in_array( strtolower($target), ['', '_self', '_parent', '_top'], true );
+    }
+
 
     /**
      * @param list<string> $uris
      */
     public static function isAllowedUri( string $src, array $uris ) : bool
     {
-        $src = strtolower( $src );
+        $candidate = self::uriParts( $src );
+        if( $candidate === null ) {
+            return false;
+        }
         $boundary = ['/', '?', '#'];
 
         foreach( $uris as $uri )
         {
-            $uri = strtolower( trim( $uri ) );
-
-            // Skip empty prefixes — str_starts_with('', ...) would allow anything.
-            if( $uri === '' || !str_starts_with( $src, $uri ) ) {
+            $prefix = self::uriParts( trim($uri) );
+            if( $prefix === null || $candidate[0] !== $prefix[0] ) {
                 continue;
             }
-
-            // A protocol-relative ("//host") candidate is cross-origin; only
-            // allow it when the prefix is itself protocol-relative, not a bare
-            // path prefix like "/".
-            if( str_starts_with( $src, '//' ) && !str_starts_with( $uri, '//' ) ) {
+            [$src, $uri] = [$candidate[1], $prefix[1]];
+            if( !str_starts_with( $src, $uri ) ) {
                 continue;
             }
-
-            // Require the match to end at a path/query/fragment boundary so a
-            // host-level prefix like "https://site.com" cannot be extended to
-            // "https://site.com.evil.com" or "https://site.com@evil.com".
             $next = $src[strlen( $uri )] ?? '';
 
             if( in_array( substr( $uri, -1 ), $boundary, true )
@@ -125,14 +200,53 @@ class Policy
 
 
     /**
-     * Normalizes a URL to what the scheme actually resolves to after serialization.
-     * Browsers strip only TAB/LF/CR from URLs, but libxml's saveHTML drops every C0
-     * control character when it serializes the attribute, so a value like
-     * "java<0x01>script:" passes a naive scheme check yet is emitted as a live
-     * "javascript:" URL. Removing all C0 controls (and DEL) anywhere — plus leading
-     * control characters and whitespace — keeps the scheme check in sync with the
-     * serialized output and can only make detection stricter (no valid URL contains
-     * a raw control byte).
+     * Compare a conservative URL subset whose browser interpretation is unambiguous.
+     * Scheme/host/default ports are normalized; path/query/fragment keep their case.
+     * Reject controls, backslashes, credentials and dot segments instead of trying
+     * to resolve them without a document base URL. IDN hosts must use ASCII punycode.
+     *
+     * @return array{string, string}|null Origin (or relative kind), path with suffix
+     */
+    private static function uriParts( string $url ) : ?array
+    {
+        if( $url === '' || preg_match( '/[\x00-\x20\x7f\\\\]/', $url ) ) {
+            return null;
+        }
+        $origin = '';
+        $resource = $url;
+        if( preg_match( '~^(?:(https?):)?//([^/?#]+)(.*)$~iD', $url, $match ) ) {
+            if( !preg_match( '/^(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?$/iD', $match[2], $host ) ) {
+                return null;
+            }
+            $scheme = strtolower( $match[1] );
+            $port = isset($host[2]) ? (int) $host[2] : null;
+            if( $port !== null && $port > 65535 ) {
+                return null;
+            }
+            if( ($scheme === 'http' && $port === 80) || ($scheme === 'https' && $port === 443) ) {
+                $port = null;
+            }
+            $origin = ($scheme === '' ? '' : $scheme . ':') . '//' . strtolower($host[1])
+                . ($port === null ? '' : ':' . $port);
+            $resource = $match[3];
+            if( !str_starts_with( $resource, '/' ) ) {
+                $resource = '/' . $resource;
+            }
+        } elseif( str_starts_with($url, '//') || preg_match('/^[a-z][a-z0-9+.-]*:/i', $url) ) {
+            return null;
+        }
+        $path = substr( $resource, 0, strcspn($resource, '?#') );
+        if( preg_match( '~(?:^|/)(?:\.|%2e){1,2}(?:/|$)~i', $path ) ) {
+            return null;
+        }
+        return [$origin, $resource];
+    }
+
+
+    /**
+     * Conservatively normalize schemes before checking them. Browsers remove
+     * TAB/LF/CR within URLs. Strip all C0 controls and DEL for this check so a
+     * later serializer that removes more controls cannot revive a blocked scheme.
      */
     public static function stripUrlControlChars( string $value ) : string
     {
@@ -168,22 +282,68 @@ class Policy
 
 
     /**
-     * Whether a URI attribute value uses a blocked scheme; a "srcset" value is
-     * split into its candidate URLs first. Backend-independent so both the legacy
-     * and native attribute passes share one rule.
+     * Whether a URI attribute value uses a blocked scheme. URL lists are scanned
+     * one token at a time so large attributes do not allocate large token arrays.
      */
     public static function uriValueBlocked( ?string $local, string $value ) : bool
     {
-        if ($local === 'srcset') {
-            foreach (preg_split('/\s*,\s*/', $value) ?: [] as $entry) {
-                $url = (preg_split('/\s+/', trim($entry)) ?: [])[0] ?? '';
-                if (self::isBlockedUri($url)) {
+        if( $local === 'ping' ) {
+            // Hyperlink auditing splits on HTML ASCII whitespace, not commas.
+            $whitespace = " \t\r\n\f";
+            $length = strlen($value);
+            $offset = 0;
+            while( $offset < $length ) {
+                $offset += strspn($value, $whitespace, $offset);
+                $size = strcspn($value, $whitespace, $offset);
+                if( self::isBlockedUri(substr($value, $offset, $size)) ) {
                     return true;
                 }
+                $offset += $size;
             }
             return false;
         }
-        return self::isBlockedUri($value);
+        if( $local !== 'srcset' ) {
+            return self::isBlockedUri($value);
+        }
+
+        // Follow HTML's srcset URL boundaries: commas inside URL tokens (e.g.
+        // data:image/png,...) are data; only trailing commas end a candidate.
+        // Check URLs even when their descriptors are invalid. Descriptor syntax
+        // and image selection are left to the browser.
+        // https://html.spec.whatwg.org/multipage/images.html#parsing-a-srcset-attribute
+        $whitespace = " \t\r\n\f";
+        $length = strlen($value);
+        $offset = 0;
+        while( $offset < $length ) {
+            $offset += strspn($value, $whitespace . ',', $offset);
+            if( $offset === $length ) {
+                break;
+            }
+            $size = strcspn($value, $whitespace, $offset);
+            $url = substr($value, $offset, $size);
+            $offset += $size;
+            if( self::isBlockedUri(rtrim($url, ',')) ) {
+                return true;
+            }
+            if( str_ends_with($url, ',') ) {
+                continue;
+            }
+
+            // Descriptor commas inside parentheses do not split candidates.
+            // This state is deliberately not nested, matching HTML's tokenizer.
+            $inParens = false;
+            while( $offset < $length ) {
+                $char = $value[$offset++];
+                if( $inParens ) {
+                    $inParens = $char !== ')';
+                } elseif( $char === ',' ) {
+                    break;
+                } elseif( $char === '(' ) {
+                    $inParens = true;
+                }
+            }
+        }
+        return false;
     }
 
 
@@ -193,13 +353,15 @@ class Policy
      */
     public static function mergeRel( string $rel ) : string
     {
-        $tokens = preg_split('/\s+/', trim($rel), -1, PREG_SPLIT_NO_EMPTY) ?: [];
-        foreach (['noopener', 'noreferrer'] as $token) {
-            if( !in_array($token, $tokens, true) ) {
-                $tokens[] = $token;
+        // Normalize separators without allocating an array entry for every token.
+        $rel = trim((string) preg_replace('/\s+/', ' ', trim($rel)), ' ');
+        $padded = ' ' . $rel . ' ';
+        foreach( ['noopener', 'noreferrer'] as $token ) {
+            if( !str_contains($padded, ' ' . $token . ' ') ) {
+                $rel .= ($rel === '' ? '' : ' ') . $token;
             }
         }
-        return implode(' ', $tokens);
+        return $rel;
     }
 
 
@@ -209,15 +371,22 @@ class Policy
      */
     public static function filterAllowFeatures( string $allow ) : string
     {
-        $kept = [];
-        foreach( explode(';', $allow) as $directive ) {
-            $directive = trim($directive);
-            $feature = strtolower( (preg_split('/\s+/', $directive) ?: [''])[0] );
+        $kept = '';
+        $offset = 0;
+        $length = strlen($allow);
+        // Scan one directive and its feature name at a time. Neither the full
+        // directive list nor the unused origin tokens need to become arrays.
+        while( $offset < $length ) {
+            $end = strpos($allow, ';', $offset);
+            $end = $end === false ? $length : $end;
+            $directive = trim(substr($allow, $offset, $end - $offset));
+            $offset = $end + 1;
+            $feature = strtolower(substr($directive, 0, strcspn($directive, " \t\r\n\f\v")));
             if( $directive !== '' && in_array($feature, self::SAFE_ALLOW_FEATURES, true) ) {
-                $kept[] = $directive;
+                $kept .= ($kept === '' ? '' : '; ') . $directive;
             }
         }
-        return implode('; ', $kept);
+        return $kept;
     }
 
 
@@ -235,19 +404,49 @@ class Policy
 
 
     /**
-     * Whether a <meta http-equiv="refresh"> content value redirects via a blocked
-     * scheme. Control chars are stripped first (an embedded one would terminate
-     * the URL extraction early and is dropped on serialize anyway) and the
-     * whitespace groups are possessive so all-whitespace content can't backtrack
-     * quadratically before the required URL token.
+     * Extract the explicit redirect URL from a meta refresh; null means invalid
+     * syntax or a reload without a URL. Keep URL controls and whitespace intact
+     * for prefix validation, and leave scheme normalization to isBlockedUri().
+     * The forward scans follow HTML's refresh boundaries without backtracking.
+     * https://html.spec.whatwg.org/multipage/semantics.html#shared-declarative-refresh-steps
      */
-    public static function metaRefreshBlocked( string $content, string $httpEquiv ) : bool
+    public static function metaRefreshUrl( string $content ) : ?string
     {
-        if( strcasecmp($httpEquiv, 'refresh') !== 0 ) {
-            return false;
+        $whitespace = " \t\r\n\f";
+        $length = strlen($content);
+        $offset = strspn($content, $whitespace);
+        // HTML permits a leading dot and ignores the fractional part of a delay.
+        $size = strspn($content, '0123456789.', $offset);
+        if( $size === 0 ) {
+            return null;
         }
-        $content = (string) preg_replace('/[\x00-\x1f\x7f]/', '', $content);
-        return preg_match('/^\s*+[\d.]*+\s*+[;,]?\s*+(?:url\s*+=\s*+)?["\']?\s*+([^"\'\s>]+)/i', $content, $m) === 1
-            && self::isBlockedUri($m[1]);
+        $offset += $size;
+        if( $offset === $length || !str_contains($whitespace . ';,', $content[$offset]) ) {
+            return null;
+        }
+        $offset += strspn($content, $whitespace, $offset);
+        if( in_array($content[$offset] ?? '', [';', ','], true) ) {
+            $offset++;
+        }
+        $offset += strspn($content, $whitespace, $offset);
+        if( $offset === $length ) {
+            return null;
+        }
+        if( strcasecmp(substr($content, $offset, 3), 'url') === 0 ) {
+            $equals = $offset + 3;
+            $equals += strspn($content, $whitespace, $equals);
+            if( ($content[$equals] ?? '') === '=' ) {
+                $offset = $equals + 1;
+                $offset += strspn($content, $whitespace, $offset);
+            }
+        }
+        // Only a matching closing quote terminates a quoted URL. Spaces,
+        // opposite quotes and '>' are URL data, not extraction boundaries.
+        if( in_array($content[$offset] ?? '', ['"', "'"], true) ) {
+            $quote = $content[$offset++];
+            $end = strpos($content, $quote, $offset);
+            return substr($content, $offset, ($end === false ? $length : $end) - $offset);
+        }
+        return substr($content, $offset);
     }
 }
