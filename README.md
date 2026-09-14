@@ -1,78 +1,126 @@
 # Aimeos Sanitizer
 
-HTML fragment sanitization for PHP 7.1+. PHP 8.4+ uses the native HTML5 parser;
-older PHP versions use Masterminds HTML5. Both backends share the security policy.
+Aimeos Sanitizer removes unsafe content from HTML fragments. It supports PHP
+7.1 and later and offers two profiles: a strict profile for untrusted rich text
+and a broader profile for applications that need backward compatibility.
 
-## Installation
+## Quick start
+
+Install the package:
 
 ```bash
 composer require aimeos/sanitizer
 ```
 
-## Untrusted rich text
-
-Use the fixed strict profile for user-supplied rich text:
+Sanitize user-supplied rich text with the strict profile:
 
 ```php
 use Aimeos\Sanitizer\Sane;
 
-$html = Sane::strict('<p id="appConfig">Hello <strong>world</strong></p><script>alert(1)</script>');
+$input = '<p id="appConfig">Hello <strong>world</strong></p>'
+    . '<script>alert(1)</script>';
+
+$html = Sane::strict($input);
+
 // <p>Hello <strong>world</strong></p>
 ```
 
-Strict mode preserves common text formatting, headings, lists, tables, links and
-images. Its element and per-element attribute allow-lists are defined in
-`Policy::STRICT_ELEMENTS`, `Policy::STRICT_GLOBAL_ATTRS` and `Policy::STRICT_ATTRS`.
-Unknown elements are removed together with their contents. Executable content,
-SVG/MathML, templates, forms, custom elements and embedding elements cannot be
-opted back in.
+## Which profile should I use?
 
-All `id`, `name`, `class`, `data-*`, `is`, event handlers, inline styles and framework
-directives are removed. Removing IDs and names prevents content from creating
-named DOM properties, but also removes in-content anchor targets. Global attributes
-are limited to `title`, `lang`, `dir` and `aria-label`.
+| Method | Use it for | How it works |
+| --- | --- | --- |
+| `Sane::strict($input)` | User-supplied rich text | Keeps only known-safe elements and attributes |
+| `Sane::html($input, $allow)` | Existing applications that need broader HTML support | Keeps content unless a rule blocks it |
 
-Links accept HTTP(S), `mailto:`, `tel:` and relative URLs. Other URL attributes
-accept HTTP(S) and relative URLs; raster `data:` images are additionally accepted
-on `<img src>`. Unknown schemes and data URLs on links are removed. Responsive
-`srcset` attributes are omitted in this profile.
+Use `Sane::strict()` for content you do not control. The optional exceptions in
+`Sane::html()` deliberately allow more powerful HTML and are only suitable for
+trusted content.
+
+## Strict profile
+
+The strict profile uses a fixed allow-list. Callers cannot enable scripts,
+embedded content or other executable elements.
+
+### What it keeps
+
+- Common text formatting, headings, lists, tables, links and images
+- The global attributes `title`, `lang`, `dir` and `aria-label`
+- HTTP(S), `mailto:`, `tel:` and relative URLs on links
+- HTTP(S) and relative URLs on other supported elements
+- Raster `data:` images on `<img src>`
+
+Element-specific attributes are allowed only where they are appropriate. The
+exact lists are defined in `Policy::STRICT_ELEMENTS`,
+`Policy::STRICT_GLOBAL_ATTRS` and `Policy::STRICT_ATTRS`.
+
+### What it removes
+
+- Unknown elements and all of their contents
+- Scripts and other executable content
+- SVG, MathML, templates, forms, custom elements and embedded content
+- `id`, `name`, `class`, `data-*`, `is`, event-handler, inline-style and
+  framework-directive attributes
+- Unknown URL schemes, data URLs on links and all `srcset` attributes
+
+Removing IDs and names prevents content from creating named DOM properties. It
+also means that in-content anchor targets are removed.
 
 ## Permissive compatibility profile
 
-The existing API preserves other elements and attributes unless specifically
-blocked. Use this profile when the consuming application needs that compatibility:
+`Sane::html()` preserves a wider range of elements and attributes while removing
+known-dangerous content:
 
 ```php
-$input = '<svg><circle r="40"/></svg><script>alert(1)</script>'
-    . '<a href="javascript:alert(2)" style="color:red" onclick="alert(3)">Click me</a>'
+use Aimeos\Sanitizer\Sane;
+
+$input = '<svg><circle r="40"/></svg>'
+    . '<script>alert(1)</script>'
+    . '<a href="javascript:alert(2)" style="color:red"'
+    . ' onclick="alert(3)">Click me</a>'
     . '<img src="data:image/png;base64,...">';
 
 echo Sane::html($input);
+
 // <a>Click me</a><img src="data:image/png;base64,...">
 ```
 
-The default blocked elements are `applet`, `base`, `embed`, `form`, `frame`,
-`iframe`, `link`, `math`, `meta`, `noembed`, `noframes`, `noscript`, `object`,
-`plaintext`, `portal`, `script`, `style`, `svg`, `template` and `xmp`.
-Comments, event handlers and style attributes are removed. Script-bearing SVG
-animation/handler elements remain blocked even when SVG is enabled. Scripts in
-SVG/MathML contexts (including their HTML integration points) are always removed.
+### What it removes by default
 
-URL attributes reject `javascript:`, `vbscript:`, `file:`, `filesystem:` and `blob:`.
-Data URLs are accepted only for `image/png`, `image/jpeg`, `image/gif` and
-`image/webp`; this checks the declared MIME type, not the image bytes. Other schemes
-are preserved by this profile. Selected global-object IDs/names are removed;
-application-specific names and attributes remain possible.
+- Comments, event handlers and style attributes
+- The URL schemes `javascript:`, `vbscript:`, `file:`, `filesystem:` and
+  `blob:`
+- Selected IDs and names that could shadow global browser objects
+- Scripts in SVG or MathML, including scripts at HTML integration points
+- Script-capable SVG animation and handler elements, even when SVG is enabled
 
-`srcset` candidates use HTML URL boundaries, preserving commas inside URLs and
-raster data images. A blocked candidate removes the whole attribute. Descriptor
-syntax and image selection remain the browser's responsibility.
-`ping` values are split on HTML ASCII whitespace and every URL is checked; a
-blocked URL removes the whole attribute. Commas remain part of each URL.
+The following elements are blocked:
 
-### Trusted exceptions
+`applet`, `base`, `embed`, `form`, `frame`, `iframe`, `link`, `math`, `meta`,
+`noembed`, `noframes`, `noscript`, `object`, `plaintext`, `portal`, `script`,
+`style`, `svg`, `template` and `xmp`.
 
-The second argument opts blocked elements back in:
+Application-specific names, attributes and URL schemes not listed above remain
+possible in this profile.
+
+### URL and image handling
+
+Raster data URLs are accepted only for `image/png`, `image/jpeg`, `image/gif`
+and `image/webp`. The sanitizer checks the declared MIME type, not the image
+bytes.
+
+For attributes containing multiple URLs:
+
+- Every `srcset` candidate is checked. One blocked candidate removes the entire
+  attribute. Commas inside URLs and raster data images are preserved; descriptor
+  syntax and image selection are left to the browser.
+- Every URL in a `ping` attribute is checked. One blocked URL removes the entire
+  attribute. Values are separated on HTML ASCII whitespace, so commas remain
+  part of a URL.
+
+## Allowing trusted elements
+
+The second argument to `Sane::html()` can allow an otherwise blocked element.
+For example, this permits YouTube embed URLs under a specific path:
 
 ```php
 $html = Sane::html($input, [
@@ -80,102 +128,171 @@ $html = Sane::html($input, [
 ]);
 ```
 
-- A URL-prefix list requires an accepted URL and a path/query/fragment boundary.
-  Scheme and host are case-insensitive, default HTTP(S) ports are normalized, and
-  paths, queries and fragments are case-sensitive.
-- For `meta http-equiv="refresh"`, prefixes match the extracted redirect URL.
-  Invalid refresh syntax and reloads without an explicit URL cannot satisfy a
-  prefix exception. Other metadata continues to match its `content` value.
-- Prefixes support HTTP(S) URLs with ASCII hosts (use punycode for IDNs),
-  protocol-relative URLs and relative paths. Relative prefixes cannot authorize
-  absolute or protocol-relative candidates. Raw whitespace/control characters,
-  backslashes, credentials and literal or percent-encoded dot path segments are
-  rejected. Use normalized URLs. Relative paths resolve against the consuming
-  document's base URL; redirects and fetched resource contents are not inspected.
-- `true` allows the element without URL-prefix restrictions. Event handlers,
-  inline style attributes and blocked URL schemes are still removed. Inline scripts
-  are dropped, but external scripts and allowed `<style>` contents retain their
-  executable effects. These are trusted-content exceptions, not suitable for
-  untrusted rich text.
-- `false` or an empty prefix list keeps an element blocked.
+| Exception value | Result |
+| --- | --- |
+| A list of URL prefixes | Allows the element only when its URL matches a prefix |
+| `true` | Allows the element without a URL restriction |
+| `false` or an empty list | Keeps the element blocked |
 
-Embedding exceptions receive a restricted attribute list. Iframes have `srcdoc`
-removed, receive `sandbox="allow-scripts allow-popups"`, and have their `allow`
-features filtered. `frame`, `embed` and `object` cannot be sandboxed this way.
-An allowed template has its contents sanitized on the legacy backend and discarded
-on the native backend, whose DOM API cannot access that content.
+> **Warning:** `true` can retain external scripts and the executable effects of
+> allowed `<style>` content. Use it only with fully trusted content. Event
+> handlers, inline style attributes, blocked URL schemes and inline scripts are
+> still removed.
 
-## Output and resource limits
+### How URL-prefix matching works
 
-Both APIs accept UTF-8 and return UTF-8 HTML fragments for an HTML element's content.
-Malformed UTF-8 returns an empty string before markup scanning or parsing, so
-discarded bytes cannot expose markup that bypasses the resource checks.
-Input charset declarations cannot change the parser encoding. Serve the output in
-a UTF-8 HTML document. These APIs are not
-encoders for attributes, JavaScript, CSS or arbitrary parsing contexts. Do not
-reinterpret retained attribute/text values as HTML later in the application.
-Serialization and malformed-markup repair can differ between backends. The legacy
-backend uses HTML5 serialization to preserve URL values, including IPv6 hosts;
-this is slower than libxml serialization on large fragments.
-The legacy parser counts scanner, tokenizer and tree-repair errors together and
-rejects a document after 2,048 errors. Illegal code points are counted before the
-scanner allocates its diagnostics, keeping that allocation bounded. Tokenizer and
-tree-repair errors skip unused messages and source-position calculations, which
-would otherwise repeatedly scan the input. This additional
-legacy limit can produce empty output for malformed content the native parser accepts.
+- A match must end at a path, query or fragment boundary. A prefix such as
+  `/embed/` cannot accidentally match `/embed-malicious/`.
+- Schemes and hosts are compared case-insensitively. Paths, queries and
+  fragments are case-sensitive. Default HTTP(S) ports are normalized.
+- Prefixes can use HTTP(S) URLs with ASCII hosts, protocol-relative URLs or
+  relative paths. Use punycode for internationalized domain names.
+- A relative prefix cannot allow an absolute or protocol-relative URL.
+- URLs containing raw whitespace, control characters, backslashes, credentials
+  or literal or percent-encoded dot path segments are rejected.
+- Relative paths resolve against the consuming document's base URL. Redirects
+  and downloaded resource contents are not inspected.
 
-Input over 4 MiB, excessive nesting (256 elements), more than 50,000 estimated nodes,
-more than 100,000 estimated attributes, or excessive attribute/malformed-markup work
-returns an empty string. The pre-scan counts elements, text runs, comments and
-declarations before the parser allocates them. Markup boundaries can conservatively
-split text runs that a parser merges.
-The estimates also charge possible copies of active formatting elements, including
-their attributes, with a separate 4 MiB budget for copied start-tag bytes. This
-prevents malformed formatting from expanding into a much larger DOM before it can
-be checked. Estimates deliberately overcount: only correctly nested explicit
-formatting end tags cancel the corresponding future copy cost.
-An iterative DOM traversal checks actual depth, all node types, total attributes
-and attribute cost before filtering, with an allowance for document wrappers.
-Parser repairs that exceed the DOM limits are rejected too. Filtering skips the
-descendants of removed elements.
-Link `rel` tokens and iframe permission directives are processed without building
-large token arrays, preserving existing values while limiting temporary memory.
-The scan uses HTML whitespace rules, so other control characters cannot disguise
-unquoted attribute values as quoted ones. The legacy tokenizer preserves form feeds
-inside quoted values, matching native parsing and allowing repeated sanitization
-of attributes containing `&#12;`. Form feeds between attributes remain valid
-whitespace. Literal less-than signs in ordinary text, such as `x <= 2`, are
-preserved as `&lt;` instead of being discarded by the legacy tokenizer.
-Declarations/CDATA containing nested markup and
-ambiguous declaration endings are rejected before parsing because the two parsers
-interpret them differently. The scan preserves complete tag names, including
-colons and underscores, and rejects name characters on which the parsers disagree.
-Malformed raw-text closing tags, script double escapes, and nested markup in
-foreign raw-text/RCDATA elements are also rejected when their boundaries are
-ambiguous. Use explicit closing tags and escape literal angle brackets in text.
-Empty output may also mean all content was removed.
+For `meta http-equiv="refresh"`, the prefix is compared with the extracted
+redirect URL. Invalid refresh values and reloads without a URL cannot match an
+exception. Other metadata is compared using its `content` value.
 
-## Validation
+### Restrictions on embedded content
+
+Allowed embedding elements receive a restricted set of attributes. Iframes:
+
+- Have `srcdoc` removed
+- Receive `sandbox="allow-scripts allow-popups"`
+- Have unsupported features removed from their `allow` attribute
+
+The elements `frame`, `embed` and `object` cannot be sandboxed in the same way.
+Allowed template contents are sanitized on the legacy backend but discarded on
+the native backend because its DOM API cannot access them.
+
+## Output and safety rules
+
+Both profiles accept UTF-8 and return a UTF-8 HTML fragment representing the
+contents of an HTML element.
+
+- Malformed UTF-8 is rejected before parsing and returns an empty string.
+- Input charset declarations cannot change the parser encoding. Serve the result
+  inside a UTF-8 HTML document.
+- An empty string can mean that the input was rejected or that sanitization
+  removed everything.
+- The result is safe only as HTML content. It is not encoded for an HTML
+  attribute, JavaScript, CSS or another parsing context.
+- Do not later reinterpret retained text or attribute values as HTML.
+
+PHP 8.4+ uses the native HTML5 parser. Older PHP versions use Masterminds HTML5.
+Both use the same security policy, but malformed HTML repair and serialization
+can differ. The legacy backend uses HTML5 serialization to preserve checked URL
+values such as IPv6 hosts, which is slower for large fragments.
+
+## Resource limits
+
+Hostile or excessively complex input is rejected with an empty string. The main
+limits are:
+
+| Resource | Limit |
+| --- | ---: |
+| Input size | 4 MiB |
+| Element nesting | 256 elements |
+| Estimated nodes | 50,000 |
+| Estimated attributes | 100,000 |
+| Copied formatting start-tag data | 4 MiB |
+| Legacy parsing errors | 2,048 |
+
+Excessive attribute processing or malformed-markup work is rejected as well.
+
+<details>
+<summary><strong>Advanced parser safeguards</strong></summary>
+
+### Before and after parsing
+
+Before parsing, a lightweight scan estimates nodes, attributes, nesting and the
+extra nodes a parser may create while repairing formatting. These estimates are
+intentionally conservative. Only correctly nested, explicit formatting end tags
+reduce the estimated repair cost.
+
+After parsing, an iterative DOM scan checks the actual depth, node types,
+attributes and attribute-processing cost. Parser repairs that exceed the limits
+are rejected. Descendants of removed elements are not filtered separately.
+
+Link `rel` tokens and iframe permission directives are processed without large
+temporary token arrays.
+
+### Legacy parser behavior
+
+The legacy backend counts scanner, tokenizer and tree-repair errors together.
+It rejects the document if their combined count exceeds 2,048. Illegal code
+points are counted before diagnostic data is allocated, and unused error
+messages and source positions are skipped. As a result, malformed input can be
+rejected by the legacy backend even when the native backend accepts it.
+
+The scanner follows HTML whitespace rules. The legacy tokenizer preserves form
+feeds inside quoted values, matching the native parser and allowing repeated
+sanitization of values containing `&#12;`. Form feeds between attributes remain
+valid whitespace. A literal less-than sign in text, such as `x <= 2`, is
+preserved as `&lt;`.
+
+### Ambiguous markup
+
+Input is rejected before parsing when the two backends would disagree about its
+boundaries. This includes:
+
+- Declarations or CDATA containing nested markup
+- Ambiguous declaration endings
+- Tag-name characters interpreted differently by the parsers
+- Malformed raw-text closing tags
+- Script double escapes
+- Nested markup in foreign raw-text or RCDATA elements
+
+Use explicit closing tags and escape literal angle brackets in text. Complete
+tag names, including colons and underscores, are preserved when both parsers
+agree on them.
+
+</details>
+
+## Development and validation
+
+### Unit tests and static analysis
 
 ```bash
 XDEBUG_MODE=off php vendor/bin/phpunit
 php vendor/bin/phpstan analyze --no-progress --debug
+```
+
+Run PHPUnit across the supported PHP versions, including PHP 7.1 and PHP 8.4+.
+PHP 7.1 development environments use Composer 2.2 LTS and PHPUnit 7.5.
+Cross-version assertion polyfills keep the same security suite available there.
+Run static analysis on a current PHP version.
+
+When the native API is available, the security suite runs its shared corpus
+directly through both backends. Functional tests verify sanitization and limit
+handling without relying on machine-speed thresholds.
+
+### Browser checks
+
+```bash
 php tests/browser.php > /tmp/sanitizer-browser.html
+```
+
+Open the generated file in a browser. It reports `passed: true` when all cases
+pass. The checks cover document and `innerHTML` reparsing and execution in
+sandboxed frames. Unsanitized positive controls confirm that execution can be
+detected. The Content Security Policy blocks external resources while allowing
+the inline code and raster data images required by the checks.
+
+### Performance benchmark
+
+```bash
 timeout 30s env XDEBUG_MODE=off php -d memory_limit=64M tests/benchmark.php
 ```
 
-Run PHPUnit across PHP 7.1+ and PHP 8.4+. PHP 7.1 development installs use
-Composer 2.2 LTS and PHPUnit 7.5; the cross-version assertion polyfills keep the
-same security suite available there. Static analysis runs on a current PHP version.
-The security regression suite also runs its shared corpus directly through both
-backends when the native API is available. Open the generated browser file to
-check document and `innerHTML` reparsing and execution in sandboxed frames; it
-reports `passed: true` when all cases pass. Unsanitized positive controls verify
-that execution can be detected. Its CSP blocks external resources while allowing
-inline code and raster data images used to verify `srcset` loading.
-Functional tests assert sanitization and budget rejection without machine-speed
-thresholds. Run the benchmark separately on an idle worker under each PHP version;
-it reports runtime settings, median timings and growth across input sizes. The
-30-second process limit bounds the whole benchmark run. Compare results on the
-same machine and investigate superlinear growth before adjusting that budget.
-These focused checks are not an audit of downstream application sinks.
+Run the benchmark on an idle machine for each PHP version. It reports runtime
+settings, median timings and growth across input sizes. Compare results on the
+same machine and investigate superlinear growth before changing the 30-second
+limit.
+
+These checks validate this package. They do not audit how downstream
+applications use the sanitized output.
