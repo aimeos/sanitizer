@@ -182,6 +182,9 @@ contents of an HTML element.
 - The result is safe only as HTML content. It is not encoded for an HTML
   attribute, JavaScript, CSS or another parsing context.
 - Do not later reinterpret retained text or attribute values as HTML.
+- Do not store the result as an SVG or XML file. XML parsers read markup
+  differently, so use an XML-based SVG sanitizer for files served as
+  `image/svg+xml`.
 
 PHP 8.4+ uses the native HTML5 parser. Older PHP versions use Masterminds HTML5.
 Both use the same security policy, but malformed HTML repair and serialization
