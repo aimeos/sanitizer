@@ -1,0 +1,31 @@
+version: 2.1
+
+jobs:
+  tests:
+    parameters:
+      php:
+        type: string
+    docker:
+      - image: cimg/php:<< parameters.php >>
+    steps:
+      - checkout
+      - run: composer update --prefer-dist --no-interaction --no-progress
+      - run: vendor/bin/phpunit
+
+  static-analysis:
+    docker:
+      - image: cimg/php:8.5
+    steps:
+      - checkout
+      - run: composer update --prefer-dist --no-interaction --no-progress
+      - run: vendor/bin/phpstan analyze --no-progress --debug
+
+workflows:
+  ci:
+    jobs:
+      - tests:
+          name: tests-php<< matrix.php >>
+          matrix:
+            parameters:
+              php: ['7.1', '7.4', '8.2', '8.4', '8.5']
+      - static-analysis
