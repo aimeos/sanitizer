@@ -21,6 +21,15 @@ class SecurityTest extends TestCase
         return $backends;
     }
 
+    /**
+     * Serializers emit CR verbatim and newer libxml versions normalize CR and
+     * CRLF to LF when re-parsing, like HTML5 input stream preprocessing does.
+     */
+    private static function newlines( string $value ) : string
+    {
+        return str_replace(["\r\n", "\r"], "\n", $value);
+    }
+
     /** @dataProvider backends */
     public function testInputCannotSelectTheParserEncoding( string $backend ) : void
     {
@@ -414,7 +423,7 @@ class SecurityTest extends TestCase
                     $this->assertNotNull($element, $label);
                     $this->assertSame(!$case['blocked'], $element->hasAttribute('ping'), $label);
                     if( !$case['blocked'] ) {
-                        $this->assertSame($case['value'], $element->getAttribute('ping'), $label);
+                        $this->assertSame(self::newlines($case['value']), self::newlines($element->getAttribute('ping')), $label);
                     }
                 }
                 $this->assertStringNotContainsString('ping=', $backend::sanitize($input, [], true), $label);
@@ -442,7 +451,7 @@ class SecurityTest extends TestCase
                     $this->assertNotNull($element, $label);
                     $this->assertSame(!($case['blocked'] ?? false), $element->hasAttribute('content'), $label);
                     if( !($case['blocked'] ?? false) ) {
-                        $this->assertSame($case['content'], $element->getAttribute('content'), $label);
+                        $this->assertSame(self::newlines($case['content']), self::newlines($element->getAttribute('content')), $label);
                     }
                 }
             }
