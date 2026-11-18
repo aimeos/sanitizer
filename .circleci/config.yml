@@ -27,5 +27,5 @@ workflows:
           name: tests-php<< matrix.php >>
           matrix:
             parameters:
-              php: ['7.1', '7.4', '8.2', '8.4', '8.5']
+              php: ['7.1', '7.4', '8.0', '8.1', '8.2', '8.4', '8.5']
       - static-analysis
