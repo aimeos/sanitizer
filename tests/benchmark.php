@@ -30,7 +30,6 @@ $cases = [
     }, [], true],
     'meta whitespace' => [[1000, 2500, 5000], function( $n ) { return str_repeat('<meta http-equiv="refresh" content="' . str_repeat(' ', 40) . '">', $n); }, ['meta' => true], false],
     'refresh URL whitespace' => [[500000, 1000000, 2000000], function( $n ) { return '<meta http-equiv="refresh" content="3600;url' . str_repeat(' ', $n) . '=https://trusted.example/safe/page">'; }, ['meta' => ['https://trusted.example/safe/']], false],
-    'ping URL tokens' => [[250000, 500000, 1000000], function( $n ) { return '<a href="/" ping="' . str_repeat('x ', $n) . 'javascript:confirm(1)">click</a>'; }, [], false],
     'vertical-tab attributes' => [[5000, 10000, 20000], function( $n ) { return "<div a=\x0b\"><div " . implode(' ', array_map(function( $i ) { return 'a' . $i; }, range(0, $n - 1))) . '>ok</div></div>'; }, [], true],
     'quoted form-feed' => [[5000, 10000, 20000], function( $n ) { return "<div title=\"\f><div " . implode(' ', array_map(function( $i ) { return 'a' . $i; }, range(0, $n - 1))) . '>ok</div></div>'; }, [], true],
     'scanner diagnostics' => [[750000, 1500000, 3000000], function( $n ) { return str_repeat("\x01", $n); }, [], true],

@@ -46,16 +46,12 @@ foreach( $backends as $backend ) {
             $imageCases[] = $test;
         }
     }
-    foreach( require __DIR__ . '/fixtures/ping.php' as $name => $case ) {
-        $value = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
-        foreach( ['a', 'area'] as $tag ) {
-            $input = '<' . $tag . ' href="/" ping="' . $value . '">' . ($tag === 'a' ? 'click</a>' : '');
-            $cases[] = [
-                'name' => $backend . ' ' . $tag . ' ping ' . $name,
-                'html' => $backend::sanitize($input, []),
-                'expected' => ['tag' => $tag, 'present' => true, 'attributes' => ['ping' => $case['blocked'] ? null : $case['value']]],
-            ];
-        }
+    foreach( ['a', 'area'] as $tag ) {
+        $cases[] = [
+            'name' => $backend . ' ' . $tag . ' ping',
+            'html' => $backend::sanitize('<' . $tag . ' href="/" ping="/ping">' . ($tag === 'a' ? 'click</a>' : ''), []),
+            'expected' => ['tag' => $tag, 'present' => true, 'attributes' => ['ping' => null]],
+        ];
     }
     foreach( require __DIR__ . '/fixtures/meta-refresh.php' as $name => $case ) {
         $value = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['content'], ENT_QUOTES, 'UTF-8'));
@@ -155,9 +151,7 @@ for (const test of cases) {
             for (const attr of element.attributes) {
                 if (/^on/i.test(attr.name)) failures.push(test.name + ': event attribute');
                 if (scalarUrls.includes(attr.name) || scalarUrls.includes(attr.localName)) checkUrl(attr.value, test.name);
-                if (attr.localName === 'ping') {
-                    for (const value of attr.value.split(/[ \t\r\n\f]+/)) checkUrl(value, test.name);
-                }
+                if (attr.localName === 'ping') failures.push(test.name + ': ping attribute');
             }
         }
     }

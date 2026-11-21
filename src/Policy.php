@@ -25,7 +25,7 @@ class Policy
     // Attributes that may contain URIs
     /** @var list<string> */
     public const URI_ATTRIBUTES = [
-        'href', 'src', 'xlink:href', 'formaction', 'action', 'background', 'poster', 'ping', 'srcset', 'data',
+        'href', 'src', 'xlink:href', 'formaction', 'action', 'background', 'poster', 'srcset', 'data',
         'cite', 'longdesc'
     ];
 
@@ -135,7 +135,8 @@ class Policy
             && !in_array( $name, self::STRICT_ATTRS[$tag] ?? [], true ) ) {
             return true;
         }
-        if( stripos( $name, 'on' ) === 0 || $name === 'style' || ($tag === 'base' && $name === 'target') ) {
+        // Hyperlink auditing sends POST requests to its URLs when links are clicked
+        if( stripos( $name, 'on' ) === 0 || $name === 'style' || $name === 'ping' || ($tag === 'base' && $name === 'target') ) {
             return true;
         }
         if( $name === 'id' || $name === 'name' ) {
@@ -287,21 +288,6 @@ class Policy
      */
     public static function uriValueBlocked( ?string $local, string $value ) : bool
     {
-        if( $local === 'ping' ) {
-            // Hyperlink auditing splits on HTML ASCII whitespace, not commas.
-            $whitespace = " \t\r\n\f";
-            $length = strlen($value);
-            $offset = 0;
-            while( $offset < $length ) {
-                $offset += strspn($value, $whitespace, $offset);
-                $size = strcspn($value, $whitespace, $offset);
-                if( self::isBlockedUri(substr($value, $offset, $size)) ) {
-                    return true;
-                }
-                $offset += $size;
-            }
-            return false;
-        }
         if( $local !== 'srcset' ) {
             return self::isBlockedUri($value);
         }

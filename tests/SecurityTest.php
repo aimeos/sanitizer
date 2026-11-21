@@ -409,25 +409,16 @@ class SecurityTest extends TestCase
     }
 
     /** @dataProvider backends */
-    public function testPingChecksEveryUrl( string $backend ) : void
+    public function testPingIsRemoved( string $backend ) : void
     {
-        foreach( require __DIR__ . '/fixtures/ping.php' as $label => $case ) {
-            $this->assertSame($case['blocked'], Policy::uriValueBlocked('ping', $case['value']), $label);
-            $value = preg_replace_callback('/[\x00-\x1f]/', function( $m ) { return '&#' . ord($m[0]) . ';'; }, htmlspecialchars($case['value'], ENT_QUOTES, 'UTF-8'));
+        foreach( ['/admin/save?id=1', 'https://example.com/ping /ping', 'javascript:confirm(1) /ping'] as $value ) {
             foreach( ['a', 'area'] as $tag ) {
-                $input = '<' . $tag . ' href="/" ping="' . $value . '">' . ($tag === 'a' ? 'click</a>' : '');
-                foreach( [$backend::sanitize($input, []), Sane::html($input)] as $output ) {
-                    $doc = new \DOMDocument();
-                    $doc->loadHTML('<?xml encoding="UTF-8">' . $output, LIBXML_NOERROR | LIBXML_NOWARNING);
-                    $element = $doc->getElementsByTagName($tag)->item(0);
-                    $this->assertNotNull($element, $label);
-                    $this->assertSame(!$case['blocked'], $element->hasAttribute('ping'), $label);
-                    if( !$case['blocked'] ) {
-                        $this->assertSame(self::newlines($case['value']), self::newlines($element->getAttribute('ping')), $label);
-                    }
+                foreach( ['ping', 'PING'] as $name ) {
+                    $input = '<' . $tag . ' href="/" ' . $name . '="' . $value . '">' . ($tag === 'a' ? 'click</a>' : '');
+                    $this->assertSame('<' . $tag . ' href="/">' . ($tag === 'a' ? 'click</a>' : ''), $backend::sanitize($input, []), $value);
+                    $this->assertStringNotContainsString('ping=', Sane::html($input), $value);
+                    $this->assertStringNotContainsString('ping=', Sane::strict($input), $value);
                 }
-                $this->assertStringNotContainsString('ping=', $backend::sanitize($input, [], true), $label);
-                $this->assertStringNotContainsString('ping=', Sane::strict($input), $label);
             }
         }
     }

@@ -86,7 +86,7 @@ echo Sane::html($input);
 
 ### What it removes by default
 
-- Comments, event handlers and style attributes
+- Comments, event handlers, style and `ping` attributes
 - The URL schemes `javascript:`, `vbscript:`, `file:`, `filesystem:` and
   `blob:`
 - Selected IDs and names that could shadow global browser objects
@@ -108,14 +108,9 @@ Raster data URLs are accepted only for `image/png`, `image/jpeg`, `image/gif`
 and `image/webp`. The sanitizer checks the declared MIME type, not the image
 bytes.
 
-For attributes containing multiple URLs:
-
-- Every `srcset` candidate is checked. One blocked candidate removes the entire
-  attribute. Commas inside URLs and raster data images are preserved; descriptor
-  syntax and image selection are left to the browser.
-- Every URL in a `ping` attribute is checked. One blocked URL removes the entire
-  attribute. Values are separated on HTML ASCII whitespace, so commas remain
-  part of a URL.
+Every candidate of a `srcset` attribute is checked. One blocked candidate
+removes the entire attribute. Commas inside URLs and raster data images are
+preserved; descriptor syntax and image selection are left to the browser.
 
 ## Allowing trusted elements
 
